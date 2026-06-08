@@ -406,6 +406,11 @@ export class ARRAY<T extends BaseTypes.AbstractDataType<any>> extends BaseTypes.
   }
 }
 
+export class JSONB extends BaseTypes.JSONB {
+  // 我们可能不需要重写 toDatabaseValue，因为问题在于查询生成阶段的处理
+  // 但我们先添加它，以便后续可能的修改
+}
+
 export class ENUM<Members extends string> extends BaseTypes.ENUM<Members> {
   override toSql(): string {
     const context = this.usageContext;

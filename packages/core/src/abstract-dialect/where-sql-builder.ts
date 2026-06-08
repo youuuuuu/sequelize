@@ -457,6 +457,7 @@ export class WhereSqlBuilder {
     // - RANGE<VALUE> Op.contains RANGE<VALUE> (both represented by fixed-size arrays in JS)
     // - RANGE<VALUE> Op.contains VALUE
     // - ARRAY<VALUE> Op.contains ARRAY<VALUE>
+    // - JSONB ARRAY Op.contains SINGLE ELEMENT or ARRAY
     // When the left operand is a range RANGE, we must be able to serialize the right operand as either a RANGE or a VALUE.
     if (!rightDataType && leftDataType instanceof DataTypes.RANGE && !Array.isArray(right)) {
       // This serializes the right operand as a VALUE
@@ -466,6 +467,24 @@ export class WhereSqlBuilder {
         operator,
         right,
         leftDataType.options.subtype,
+        options,
+      );
+    }
+
+    // If leftDataType is JSON or JSONB and right is not an array, we need to wrap it as a single-element array
+    // to generate proper PostgreSQL JSONB contains syntax
+    if (
+      !Array.isArray(right) &&
+      (leftDataType instanceof DataTypes.JSON || leftDataType instanceof DataTypes.JSONB)
+    ) {
+      // Use the JSON type to serialize the right value as JSON array containing that single value
+      const jsonType = this.#jsonType;
+      return this.formatBinaryOperation(
+        left,
+        leftDataType,
+        operator,
+        [right],
+        jsonType,
         options,
       );
     }
@@ -486,6 +505,7 @@ export class WhereSqlBuilder {
     // - RANGE<VALUE> Op.contained RANGE<VALUE> (both represented by fixed-size arrays in JS)
     // - VALUE Op.contained RANGE<VALUE>
     // - ARRAY<VALUE> Op.contained ARRAY<VALUE>
+    // - SINGLE ELEMENT Op.contained JSONB ARRAY
 
     // This serializes VALUE contained RANGE
     if (
@@ -500,6 +520,22 @@ export class WhereSqlBuilder {
         operator,
         right,
         new DataTypes.RANGE(leftDataType).toDialectDataType(this.#dialect),
+        options,
+      );
+    }
+
+    // If rightDataType is JSON or JSONB and left is not an array, we need to wrap it as a single-element array
+    if (
+      !Array.isArray(left) &&
+      (rightDataType instanceof DataTypes.JSON || rightDataType instanceof DataTypes.JSONB)
+    ) {
+      const jsonType = this.#jsonType;
+      return this.formatBinaryOperation(
+        [left],
+        jsonType,
+        operator,
+        right,
+        rightDataType,
         options,
       );
     }

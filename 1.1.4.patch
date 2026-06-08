@@ -1,0 +1,84 @@
+diff --git a/packages/core/src/abstract-dialect/where-sql-builder.ts b/packages/core/src/abstract-dialect/where-sql-builder.ts
+index d55f992e4..dbf37e64d 100644
+--- a/packages/core/src/abstract-dialect/where-sql-builder.ts
++++ b/packages/core/src/abstract-dialect/where-sql-builder.ts
+@@ -457,6 +457,7 @@ export class WhereSqlBuilder {
+     // - RANGE<VALUE> Op.contains RANGE<VALUE> (both represented by fixed-size arrays in JS)
+     // - RANGE<VALUE> Op.contains VALUE
+     // - ARRAY<VALUE> Op.contains ARRAY<VALUE>
++    // - JSONB ARRAY Op.contains SINGLE ELEMENT or ARRAY
+     // When the left operand is a range RANGE, we must be able to serialize the right operand as either a RANGE or a VALUE.
+     if (!rightDataType && leftDataType instanceof DataTypes.RANGE && !Array.isArray(right)) {
+       // This serializes the right operand as a VALUE
+@@ -470,6 +471,24 @@ export class WhereSqlBuilder {
+       );
+     }
+ 
++    // If leftDataType is JSON or JSONB and right is not an array, we need to wrap it as a single-element array
++    // to generate proper PostgreSQL JSONB contains syntax
++    if (
++      !Array.isArray(right) &&
++      (leftDataType instanceof DataTypes.JSON || leftDataType instanceof DataTypes.JSONB)
++    ) {
++      // Use the JSON type to serialize the right value as JSON array containing that single value
++      const jsonType = this.#jsonType;
++      return this.formatBinaryOperation(
++        left,
++        leftDataType,
++        operator,
++        [right],
++        jsonType,
++        options,
++      );
++    }
++
+     // This serializes the right operand as a RANGE (or an array for ARRAY contains ARRAY)
+     return this.formatBinaryOperation(left, leftDataType, operator, right, rightDataType, options);
+   }
+@@ -486,6 +505,7 @@ export class WhereSqlBuilder {
+     // - RANGE<VALUE> Op.contained RANGE<VALUE> (both represented by fixed-size arrays in JS)
+     // - VALUE Op.contained RANGE<VALUE>
+     // - ARRAY<VALUE> Op.contained ARRAY<VALUE>
++    // - SINGLE ELEMENT Op.contained JSONB ARRAY
+ 
+     // This serializes VALUE contained RANGE
+     if (
+@@ -504,6 +524,22 @@ export class WhereSqlBuilder {
+       );
+     }
+ 
++    // If rightDataType is JSON or JSONB and left is not an array, we need to wrap it as a single-element array
++    if (
++      !Array.isArray(left) &&
++      (rightDataType instanceof DataTypes.JSON || rightDataType instanceof DataTypes.JSONB)
++    ) {
++      const jsonType = this.#jsonType;
++      return this.formatBinaryOperation(
++        [left],
++        jsonType,
++        operator,
++        right,
++        rightDataType,
++        options,
++      );
++    }
++
+     // This serializes:
+     // RANGE contained RANGE
+     // ARRAY contained ARRAY
+diff --git a/packages/postgres/src/_internal/data-types-overrides.ts b/packages/postgres/src/_internal/data-types-overrides.ts
+index da82c5b5c..a8a528d2b 100644
+--- a/packages/postgres/src/_internal/data-types-overrides.ts
++++ b/packages/postgres/src/_internal/data-types-overrides.ts
+@@ -406,6 +406,11 @@ export class ARRAY<T extends BaseTypes.AbstractDataType<any>> extends BaseTypes.
+   }
+ }
+ 
++export class JSONB extends BaseTypes.JSONB {
++  // 我们可能不需要重写 toDatabaseValue，因为问题在于查询生成阶段的处理
++  // 但我们先添加它，以便后续可能的修改
++}
++
+ export class ENUM<Members extends string> extends BaseTypes.ENUM<Members> {
+   override toSql(): string {
+     const context = this.usageContext;
