@@ -1,10 +1,17 @@
-import { EMPTY_ARRAY, EMPTY_OBJECT, shallowClonePojo } from '@sequelize/utils';
+import { EMPTY_ARRAY, EMPTY_OBJECT, find, pojo, shallowClonePojo } from '@sequelize/utils';
+import defaultsLodash from 'lodash/defaults';
+import intersection from 'lodash/intersection';
+import omit from 'lodash/omit';
+import without from 'lodash/without';
 import assert from 'node:assert';
+import { AbstractDataType } from './abstract-dialect/data-types.js';
 import { getBelongsToAssociationsWithTarget } from './_model-internals/get-belongs-to-associations-with-target.js';
-import type { BelongsToAssociation } from './associations/index.js';
+import { BelongsToAssociation, BelongsToManyAssociation } from './associations/index.js';
+import * as SequelizeErrors from './errors/index.js';
 import { mayRunHook } from './hooks.js';
 import type { ModelDefinition } from './model-definition.js';
 import {
+  _validateIncludedElements,
   assertHasPrimaryKey,
   assertHasWhereOptions,
   ensureOptionsAreImmutable,
@@ -18,8 +25,52 @@ import type {
   DestroyManyOptions,
 } from './model-repository.types.js';
 import { ManualOnDelete } from './model-repository.types.js';
-import type { Model, Transactionable } from './model.js';
+import type {
+  Attributes,
+  BulkCreateOptions,
+  CreationAttributes,
+  Model,
+  ModelStatic,
+  Transactionable,
+} from './model.js';
 import { Op } from './operators.js';
+import { mapValueFieldNames } from './utils/format.js';
+import { cloneDeep } from './utils/object.js';
+
+type BulkUpsertModelStatic<M extends Model> = ModelStatic<M> & {
+  _conformIncludes(options: object, self: ModelStatic<M>): void;
+  _expandIncludeAll(options: object): void;
+};
+
+type BulkWriteQueryInterface = {
+  bulkInsert(
+    tableName: unknown,
+    records: object[],
+    options?: object,
+    attributes?: Record<string, unknown>,
+  ): Promise<unknown>;
+  bulkUpsert?(
+    tableName: unknown,
+    records: object[],
+    options?: object,
+    attributes?: Record<string, unknown>,
+  ): Promise<unknown>;
+};
+
+type BulkUpsertOptions<M extends Model> = Omit<
+  BulkCreateOptions<Attributes<M>>,
+  'fields' | 'updateOnDuplicate' | 'conflictAttributes' | 'returning'
+> & {
+  fields?: string[] | undefined;
+  updateOnDuplicate?: string[] | undefined;
+  conflictAttributes?: string[] | undefined;
+  returning?: BulkCreateOptions<Attributes<M>>['returning'] | string[] | undefined;
+  model?: BulkUpsertModelStatic<M> | undefined;
+  includeValidated?: boolean | undefined;
+  association?: unknown;
+  upsertKeys?: string[] | undefined;
+  skip?: string[] | undefined;
+};
 
 /**
  * The goal of this class is to become the new home of all the static methods that are currently present on the Model class,
@@ -45,6 +96,432 @@ export class ModelRepository<M extends Model = Model> {
 
   get #queryInterface() {
     return this.#sequelize.queryInterface;
+  }
+
+  async bulkUpsert(
+    records: ReadonlyArray<CreationAttributes<M>>,
+    options: BulkCreateOptions<Attributes<M>> = EMPTY_OBJECT,
+  ): Promise<M[]> {
+    if (records.length === 0) {
+      return [];
+    }
+
+    const dialect = this.#sequelize.dialect.name;
+    const now = new Date();
+    const model = this.#modelDefinition.model as BulkUpsertModelStatic<M>;
+    const queryInterface = this.#queryInterface as unknown as BulkWriteQueryInterface;
+    const executeBulkUpsert = queryInterface.bulkUpsert?.bind(queryInterface) ?? queryInterface.bulkInsert.bind(queryInterface);
+
+    const bulkUpsertOptions = (cloneDeep(options) ?? {}) as BulkUpsertOptions<M>;
+
+    setTransactionFromCls(bulkUpsertOptions, this.#sequelize);
+
+    bulkUpsertOptions.model = model;
+
+    if (!bulkUpsertOptions.includeValidated) {
+      model._conformIncludes(bulkUpsertOptions, model);
+      if (bulkUpsertOptions.include) {
+        model._expandIncludeAll(bulkUpsertOptions);
+        _validateIncludedElements(bulkUpsertOptions);
+      }
+    }
+
+    const instances = records.map(values =>
+      model.build(values, { isNewRecord: true, include: bulkUpsertOptions.include }),
+    );
+
+    const recursiveBulkUpsert = async <T extends Model>(
+      instancesToUpsert: T[],
+      recursiveOptions: BulkUpsertOptions<T>,
+    ): Promise<T[]> => {
+      const options: BulkUpsertOptions<T> = {
+        validate: false,
+        hooks: true,
+        individualHooks: false,
+        ignoreDuplicates: false,
+        ...recursiveOptions,
+      };
+
+      if (options.returning === undefined) {
+        options.returning = options.association ? false : true;
+      }
+
+      const model = options.model!;
+      if (options.ignoreDuplicates && model.sequelize.dialect.supports.inserts.ignoreDuplicates === false) {
+        throw new Error(`${dialect} does not support the ignoreDuplicates option.`);
+      }
+
+      if (options.updateOnDuplicate && !model.sequelize.dialect.supports.inserts.updateOnDuplicate) {
+        throw new Error(`${dialect} does not support the updateOnDuplicate option.`);
+      }
+
+      const modelDefinition = model.modelDefinition;
+      const fields = (options.fields ??= Array.from(modelDefinition.attributes.keys()));
+      const createdAtAttr = modelDefinition.timestampAttributeNames.createdAt;
+      const updatedAtAttr = modelDefinition.timestampAttributeNames.updatedAt;
+
+      if (options.updateOnDuplicate !== undefined) {
+        if (Array.isArray(options.updateOnDuplicate) && options.updateOnDuplicate.length > 0) {
+          options.updateOnDuplicate = intersection(
+            without(Object.keys(model.tableAttributes), createdAtAttr),
+            options.updateOnDuplicate,
+          );
+        } else {
+          throw new Error('updateOnDuplicate option only supports non-empty array.');
+        }
+      }
+
+      if (options.hooks) {
+        await model.hooks.runAsync(
+          'beforeBulkCreate',
+          instancesToUpsert,
+          options as BulkCreateOptions<Attributes<T>>,
+        );
+      }
+
+      if (options.validate) {
+        const errors: SequelizeErrors.BulkRecordError[] = [];
+        const validateOptions = {
+          ...options,
+          hooks: options.individualHooks ?? false,
+        } as any;
+
+        await Promise.all(
+          instancesToUpsert.map(async instance => {
+            try {
+              await instance.validate(validateOptions);
+            } catch (error) {
+              errors.push(new SequelizeErrors.BulkRecordError(error as Error, instance));
+            }
+          }),
+        );
+
+        delete options.skip;
+        if (errors.length > 0) {
+          throw new SequelizeErrors.AggregateError(errors);
+        }
+      }
+
+      if (options.individualHooks) {
+        await Promise.all(
+          instancesToUpsert.map(async instance => {
+            const individualOptions = {
+              ...options,
+              validate: false,
+              hooks: true,
+            } as any;
+            delete individualOptions.fields;
+            delete individualOptions.individualHooks;
+            delete individualOptions.ignoreDuplicates;
+
+            await instance.save(individualOptions);
+          }),
+        );
+      } else {
+        if (options.include && options.include.length > 0) {
+          await Promise.all(
+            options.include
+              .filter((include: any) => include.association instanceof BelongsToAssociation)
+              .map(async (include: any) => {
+                const associationInstances: Model[] = [];
+                const associationInstanceIndexToInstanceMap: T[] = [];
+
+                for (const instance of instancesToUpsert) {
+                  const associationInstance = instance.get(include.as) as Model | null;
+                  if (associationInstance) {
+                    associationInstances.push(associationInstance);
+                    associationInstanceIndexToInstanceMap.push(instance);
+                  }
+                }
+
+                if (associationInstances.length === 0) {
+                  return;
+                }
+
+                const includeOptions = defaultsLodash(omit(cloneDeep(include), ['association']), {
+                  connection: options.connection,
+                  transaction: options.transaction,
+                  logging: options.logging,
+                }) as BulkUpsertOptions<Model>;
+
+                const createdAssociationInstances = await recursiveBulkUpsert(
+                  associationInstances,
+                  includeOptions,
+                );
+                for (const idx in createdAssociationInstances) {
+                  const associationInstance = createdAssociationInstances[idx];
+                  const instance = associationInstanceIndexToInstanceMap[idx];
+
+                  await include.association.set(instance, associationInstance, {
+                    save: false,
+                    logging: options.logging,
+                  });
+                }
+              }),
+          );
+        }
+
+        const serializedRecords = instancesToUpsert.map(instance => {
+          const values = instance.dataValues;
+
+          if (createdAtAttr && !values[createdAtAttr]) {
+            values[createdAtAttr] = now;
+            if (!fields.includes(createdAtAttr)) {
+              fields.push(createdAtAttr);
+            }
+          }
+
+          if (updatedAtAttr && !values[updatedAtAttr]) {
+            values[updatedAtAttr] = now;
+            if (!fields.includes(updatedAtAttr)) {
+              fields.push(updatedAtAttr);
+            }
+          }
+
+          const out = mapValueFieldNames(values, fields, model);
+          for (const key of modelDefinition.virtualAttributeNames) {
+            delete out[key];
+          }
+
+          return out;
+        });
+
+        const fieldMappedAttributes = pojo<Record<string, unknown>>();
+        for (const attrName in model.tableAttributes) {
+          const attribute = modelDefinition.attributes.get(attrName);
+          if (attribute) {
+            fieldMappedAttributes[attribute.columnName] = attribute;
+          }
+        }
+
+        if (options.updateOnDuplicate) {
+          options.updateOnDuplicate = options.updateOnDuplicate.map(attrName => {
+            return modelDefinition.getColumnName(String(attrName));
+          });
+
+          if (options.conflictAttributes) {
+            options.upsertKeys = options.conflictAttributes.map(attrName =>
+              modelDefinition.getColumnName(String(attrName)),
+            );
+          } else {
+            const upsertKeys: string[] = [];
+
+            for (const index of model.getIndexes()) {
+              if (index.unique && !index.where) {
+                upsertKeys.push(...(index.fields as string[]));
+              }
+            }
+
+            options.upsertKeys =
+              upsertKeys.length > 0
+                ? upsertKeys
+                : Object.values(model.primaryKeys).map(primaryKey => primaryKey.field);
+          }
+        }
+
+        if (options.returning && Array.isArray(options.returning)) {
+          options.returning = options.returning.map(attr =>
+            typeof attr === 'string' ? modelDefinition.getColumnNameLoose(attr) : attr,
+          );
+        }
+
+        const results = await executeBulkUpsert(
+          model.table,
+          serializedRecords,
+          options,
+          fieldMappedAttributes,
+        );
+        if (Array.isArray(results)) {
+          for (const [i, result] of results.entries()) {
+            const instance = instancesToUpsert[i] as T & {
+              _previousDataValues: Record<string, unknown>;
+            };
+
+            for (const key in result as Record<string, unknown>) {
+              if (!Object.hasOwn(result as Record<string, unknown>, key)) {
+                continue;
+              }
+
+              if (
+                !instance ||
+                (key === model.primaryKeyAttribute &&
+                  instance.get(model.primaryKeyAttribute) &&
+                  ['mysql', 'mariadb'].includes(dialect))
+              ) {
+                continue;
+              }
+
+              const value = (result as Record<string, unknown>)[key];
+              const attribute = find(
+                modelDefinition.attributes.values(),
+                (candidate: any) => candidate.attributeName === key || candidate.columnName === key,
+              );
+              const attributeName = attribute?.attributeName || key;
+              instance.dataValues[attributeName] =
+                value != null && attribute?.type instanceof AbstractDataType
+                  ? attribute.type.parseDatabaseValue(value)
+                  : value;
+              instance._previousDataValues[attributeName] = instance.dataValues[attributeName];
+            }
+          }
+        }
+      }
+
+      if (options.include && options.include.length > 0) {
+        await Promise.all(
+          options.include
+            .filter(
+              (include: any) =>
+                !(
+                  include.association instanceof BelongsToAssociation ||
+                  (include.parent && include.parent.association instanceof BelongsToManyAssociation)
+                ),
+            )
+            .map(async (include: any) => {
+              const associationInstances: Model[] = [];
+              const associationInstanceIndexToInstanceMap: T[] = [];
+
+              for (const instance of instancesToUpsert) {
+                let associated: any = instance.get(include.as);
+                if (!Array.isArray(associated)) {
+                  associated = [associated];
+                }
+
+                for (const associationInstance of associated as Model[]) {
+                  if (associationInstance) {
+                    if (!(include.association instanceof BelongsToManyAssociation)) {
+                      const instanceModel = instance.constructor as ModelStatic<Model>;
+                      associationInstance.set(
+                        include.association.foreignKey,
+                        instance.get(
+                          include.association.sourceKey || instanceModel.primaryKeyAttribute,
+                          { raw: true },
+                        ),
+                        { raw: true },
+                      );
+                      Object.assign(associationInstance, include.association.scope);
+                    }
+
+                    associationInstances.push(associationInstance);
+                    associationInstanceIndexToInstanceMap.push(instance);
+                  }
+                }
+              }
+
+              if (associationInstances.length === 0) {
+                return;
+              }
+
+              const includeOptions = defaultsLodash(omit(cloneDeep(include), ['association']), {
+                connection: options.connection,
+                transaction: options.transaction,
+                logging: options.logging,
+              }) as BulkUpsertOptions<Model>;
+
+              const createdAssociationInstances = await recursiveBulkUpsert(
+                associationInstances,
+                includeOptions,
+              );
+              if (include.association instanceof BelongsToManyAssociation) {
+                const valueSets: Array<Record<string, unknown>> = [];
+
+                for (const idx in createdAssociationInstances) {
+                  const associationInstance = createdAssociationInstances[idx];
+                  const instance = associationInstanceIndexToInstanceMap[idx];
+                  const instanceModel = instance.constructor as ModelStatic<Model>;
+                  const associationModel = associationInstance.constructor as ModelStatic<Model>;
+                  const associationInstanceWithThrough = associationInstance as any;
+
+                  const values: Record<string, unknown> = {
+                    [include.association.foreignKey]: instance.get(instanceModel.primaryKeyAttribute as string, {
+                      raw: true,
+                    }),
+                    [include.association.otherKey]: associationInstance.get(
+                      associationModel.primaryKeyAttribute as string,
+                      { raw: true },
+                    ),
+                    ...include.association.through.scope,
+                  };
+                  if (associationInstanceWithThrough[include.association.through.model.name]) {
+                    const throughDefinition = include.association.through.model.modelDefinition;
+
+                    for (const attributeName of throughDefinition.attributes.keys()) {
+                      const attribute = throughDefinition.attributes.get(attributeName);
+
+                      if (
+                        attribute?._autoGenerated ||
+                        attributeName === include.association.foreignKey ||
+                        attributeName === include.association.otherKey ||
+                        typeof associationInstanceWithThrough[include.association.through.model.name][
+                          attributeName
+                        ] === 'undefined'
+                      ) {
+                        continue;
+                      }
+
+                      values[attributeName] =
+                        associationInstanceWithThrough[include.association.through.model.name][
+                          attributeName
+                        ];
+                    }
+                  }
+
+                  valueSets.push(values);
+                }
+
+                const throughOptions = defaultsLodash(
+                  omit(cloneDeep(include), ['association', 'attributes']),
+                  {
+                    connection: options.connection,
+                    transaction: options.transaction,
+                    logging: options.logging,
+                  },
+                ) as BulkUpsertOptions<Model>;
+                throughOptions.model = include.association.throughModel as BulkUpsertModelStatic<Model>;
+                const throughInstances = include.association.throughModel.bulkBuild(
+                  valueSets,
+                  throughOptions,
+                );
+
+                await recursiveBulkUpsert(throughInstances, throughOptions);
+              }
+            }),
+        );
+      }
+
+      for (const instance of instancesToUpsert) {
+        const attributeDefs = modelDefinition.attributes;
+        const instanceData = instance as T & { _previousDataValues: Record<string, unknown> };
+
+        for (const attribute of attributeDefs.values()) {
+          if (
+            instanceData.dataValues[attribute.columnName] !== undefined &&
+            attribute.columnName !== attribute.attributeName
+          ) {
+            instanceData.dataValues[attribute.attributeName] = instanceData.dataValues[attribute.columnName];
+            delete instanceData.dataValues[attribute.columnName];
+          }
+
+          instanceData._previousDataValues[attribute.attributeName] =
+            instanceData.dataValues[attribute.attributeName];
+          instanceData.changed(attribute.attributeName, false);
+        }
+
+        instanceData.isNewRecord = false;
+      }
+
+      if (options.hooks) {
+        await model.hooks.runAsync(
+          'afterBulkCreate',
+          instancesToUpsert,
+          options as BulkCreateOptions<Attributes<T>>,
+        );
+      }
+
+      return instancesToUpsert;
+    };
+
+    return recursiveBulkUpsert(instances, bulkUpsertOptions);
   }
 
   async _UNSTABLE_destroy(
