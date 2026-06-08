@@ -1,0 +1,220 @@
+diff --git a/packages/core/src/abstract-dialect/dialect.ts b/packages/core/src/abstract-dialect/dialect.ts
+index f07bff2f5..64c2f7bf4 100644
+--- a/packages/core/src/abstract-dialect/dialect.ts
++++ b/packages/core/src/abstract-dialect/dialect.ts
+@@ -229,6 +229,7 @@ export type DialectSupports = {
+     unquoted: boolean;
+     quoted: boolean;
+   };
++  jsonTable: boolean;
+   tmpTableTrigger: boolean;
+   indexHints: boolean;
+   tableHints: boolean;
+@@ -476,6 +477,7 @@ export abstract class AbstractDialect<
+       unquoted: false,
+       quoted: false,
+     },
++    jsonTable: false,
+     REGEXP: false,
+     IREGEXP: false,
+     tmpTableTrigger: false,
+diff --git a/packages/core/src/expression-builders/sql.ts b/packages/core/src/expression-builders/sql.ts
+index fb87432c6..c82295716 100644
+--- a/packages/core/src/expression-builders/sql.ts
++++ b/packages/core/src/expression-builders/sql.ts
+@@ -7,6 +7,7 @@ import { Unquote } from './dialect-aware-fn.js';
+ import { fn } from './fn.js';
+ import { identifier } from './identifier.js';
+ import { jsonPath } from './json-path.js';
++import { jsonTable } from './json-table.js';
+ import { list } from './list.js';
+ import { Literal, literal } from './literal.js';
+ import { Random } from './random.js';
+@@ -68,6 +69,7 @@ sql.col = col;
+ sql.fn = fn;
+ sql.identifier = identifier;
+ sql.jsonPath = jsonPath;
++sql.jsonTable = jsonTable;
+ sql.list = list;
+ sql.literal = literal;
+ sql.where = where;
+diff --git a/packages/mysql/src/dialect.ts b/packages/mysql/src/dialect.ts
+index 6bdbe79c6..6978e8e28 100644
+--- a/packages/mysql/src/dialect.ts
++++ b/packages/mysql/src/dialect.ts
+@@ -87,6 +87,7 @@ export class MySqlDialect extends AbstractDialect<MySqlDialectOptions, MySqlConn
+       unquoted: true,
+       quoted: true,
+     },
++    jsonTable: true,
+     REGEXP: true,
+     uuidV1Generation: true,
+     globalTimeZoneConfig: true,
+diff --git a/packages/mysql/src/query-generator.d.ts b/packages/mysql/src/query-generator.d.ts
+index 454da5787..d3818c528 100644
+--- a/packages/mysql/src/query-generator.d.ts
++++ b/packages/mysql/src/query-generator.d.ts
+@@ -1,3 +1,17 @@
++import type { Expression } from '@sequelize/core';
++import type { EscapeOptions } from '@sequelize/core/_non-semver-use-at-your-own-risk_/abstract-dialect/query-generator-typescript.js';
++import type {
++  JsonTableColumn,
++  JsonTableOptions,
++} from '@sequelize/core/_non-semver-use-at-your-own-risk_/expression-builders/json-table.js';
+ import { MySqlQueryGeneratorTypeScript } from './query-generator-typescript.internal.js';
+ 
+-export class MySqlQueryGenerator extends MySqlQueryGeneratorTypeScript {}
++export class MySqlQueryGenerator extends MySqlQueryGeneratorTypeScript {
++  jsonTable(
++    expression: Expression,
++    path: string,
++    columns: readonly JsonTableColumn[],
++    options: JsonTableOptions,
++    escapeOptions?: EscapeOptions,
++  ): string;
++}
+diff --git a/packages/mysql/src/query-generator.js b/packages/mysql/src/query-generator.js
+index a5a5653b8..f2f4cfaa5 100644
+--- a/packages/mysql/src/query-generator.js
++++ b/packages/mysql/src/query-generator.js
+@@ -16,6 +16,115 @@ import isPlainObject from 'lodash/isPlainObject';
+ import { MySqlQueryGeneratorTypeScript } from './query-generator-typescript.internal.js';
+ 
+ const typeWithoutDefault = new Set(['BLOB', 'TEXT', 'GEOMETRY', 'JSON']);
++const JSON_TABLE_MINIMUM_VERSION = '8.0.4';
++
++function formatJsonTableSqlType(queryGenerator, sqlType) {
++  if (typeof sqlType === 'string') {
++    return sqlType;
++  }
++
++  return attributeTypeToSql(normalizeDataType(sqlType, queryGenerator.dialect), {
++    escape: queryGenerator.escape.bind(queryGenerator),
++    dialect: queryGenerator.dialect,
++  });
++}
++
++function formatJsonTableBehavior(queryGenerator, clause, behavior) {
++  if (behavior == null) {
++    return '';
++  }
++
++  if (behavior === 'null') {
++    return `NULL ON ${clause}`;
++  }
++
++  if (behavior === 'error') {
++    return `ERROR ON ${clause}`;
++  }
++
++  return `DEFAULT ${queryGenerator.escape(behavior.default)} ON ${clause}`;
++}
++
++function formatJsonTableColumn(queryGenerator, column) {
++  if (column.kind === 'ordinality') {
++    return `${queryGenerator.quoteIdentifier(column.name)} FOR ORDINALITY`;
++  }
++
++  if (column.kind === 'exists') {
++    return joinSQLFragments([
++      queryGenerator.quoteIdentifier(column.name),
++      formatJsonTableSqlType(queryGenerator, column.sqlType),
++      'EXISTS PATH',
++      queryGenerator.escape(column.path),
++    ]);
++  }
++
++  if (column.kind === 'nested') {
++    if (column.columns.length === 0) {
++      throw new Error('JSON_TABLE nested columns require at least one column definition.');
++    }
++
++    return joinSQLFragments([
++      'NESTED PATH',
++      queryGenerator.escape(column.path),
++      `COLUMNS (${column.columns.map(nestedColumn => formatJsonTableColumn(queryGenerator, nestedColumn)).join(', ')})`,
++    ]);
++  }
++
++  return joinSQLFragments([
++    queryGenerator.quoteIdentifier(column.name),
++    formatJsonTableSqlType(queryGenerator, column.sqlType),
++    'PATH',
++    queryGenerator.escape(column.path),
++    formatJsonTableBehavior(queryGenerator, 'EMPTY', column.onEmpty),
++    formatJsonTableBehavior(queryGenerator, 'ERROR', column.onError),
++  ]);
++}
++
++function parseMysqlVersion(version) {
++  const match = /^(\d+)\.(\d+)\.(\d+)/.exec(version);
++
++  if (!match) {
++    return null;
++  }
++
++  return match.slice(1).map(Number);
++}
++
++function isMysqlVersionLessThan(version, minimumVersion) {
++  const parsedVersion = parseMysqlVersion(version);
++  const parsedMinimumVersion = parseMysqlVersion(minimumVersion);
++
++  if (!parsedVersion || !parsedMinimumVersion) {
++    return false;
++  }
++
++  for (const [index, part] of parsedVersion.entries()) {
++    if (part < parsedMinimumVersion[index]) {
++      return true;
++    }
++
++    if (part > parsedMinimumVersion[index]) {
++      return false;
++    }
++  }
++
++  return false;
++}
++
++function assertJsonTableSupported(queryGenerator) {
++  if (!queryGenerator.dialect.supports.jsonTable) {
++    throw new Error(`JSON_TABLE is not supported in ${queryGenerator.dialect.name}.`);
++  }
++
++  const databaseVersion = queryGenerator.sequelize.getDatabaseVersionIfExist();
++
++  if (databaseVersion && isMysqlVersionLessThan(databaseVersion, JSON_TABLE_MINIMUM_VERSION)) {
++    throw new Error(
++      `JSON_TABLE requires MySQL ${JSON_TABLE_MINIMUM_VERSION} or newer, but the current database version is ${databaseVersion}.`,
++    );
++  }
++}
+ 
+ export class MySqlQueryGenerator extends MySqlQueryGeneratorTypeScript {
+   createTableQuery(tableName, attributes, options) {
+@@ -265,6 +374,24 @@ export class MySqlQueryGenerator extends MySqlQueryGeneratorTypeScript {
+     return result;
+   }
+ 
++  jsonTable(expression, path, columns, options, escapeOptions) {
++    assertJsonTableSupported(this);
++
++    if (!options?.alias) {
++      throw new Error('JSON_TABLE requires an alias.');
++    }
++
++    if (columns.length === 0) {
++      throw new Error('JSON_TABLE requires at least one column definition.');
++    }
++
++    return joinSQLFragments([
++      `JSON_TABLE(${this.escape(expression, escapeOptions)}, ${this.escape(path)} COLUMNS (${columns.map(column => formatJsonTableColumn(this, column)).join(', ')}))`,
++      'AS',
++      this.quoteIdentifier(options.alias),
++    ]);
++  }
++
+   _getBeforeSelectAttributesFragment(options) {
+     let fragment = '';
+ 

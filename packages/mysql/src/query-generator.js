@@ -16,6 +16,115 @@ import isPlainObject from 'lodash/isPlainObject';
 import { MySqlQueryGeneratorTypeScript } from './query-generator-typescript.internal.js';
 
 const typeWithoutDefault = new Set(['BLOB', 'TEXT', 'GEOMETRY', 'JSON']);
+const JSON_TABLE_MINIMUM_VERSION = '8.0.4';
+
+function formatJsonTableSqlType(queryGenerator, sqlType) {
+  if (typeof sqlType === 'string') {
+    return sqlType;
+  }
+
+  return attributeTypeToSql(normalizeDataType(sqlType, queryGenerator.dialect), {
+    escape: queryGenerator.escape.bind(queryGenerator),
+    dialect: queryGenerator.dialect,
+  });
+}
+
+function formatJsonTableBehavior(queryGenerator, clause, behavior) {
+  if (behavior == null) {
+    return '';
+  }
+
+  if (behavior === 'null') {
+    return `NULL ON ${clause}`;
+  }
+
+  if (behavior === 'error') {
+    return `ERROR ON ${clause}`;
+  }
+
+  return `DEFAULT ${queryGenerator.escape(behavior.default)} ON ${clause}`;
+}
+
+function formatJsonTableColumn(queryGenerator, column) {
+  if (column.kind === 'ordinality') {
+    return `${queryGenerator.quoteIdentifier(column.name)} FOR ORDINALITY`;
+  }
+
+  if (column.kind === 'exists') {
+    return joinSQLFragments([
+      queryGenerator.quoteIdentifier(column.name),
+      formatJsonTableSqlType(queryGenerator, column.sqlType),
+      'EXISTS PATH',
+      queryGenerator.escape(column.path),
+    ]);
+  }
+
+  if (column.kind === 'nested') {
+    if (column.columns.length === 0) {
+      throw new Error('JSON_TABLE nested columns require at least one column definition.');
+    }
+
+    return joinSQLFragments([
+      'NESTED PATH',
+      queryGenerator.escape(column.path),
+      `COLUMNS (${column.columns.map(nestedColumn => formatJsonTableColumn(queryGenerator, nestedColumn)).join(', ')})`,
+    ]);
+  }
+
+  return joinSQLFragments([
+    queryGenerator.quoteIdentifier(column.name),
+    formatJsonTableSqlType(queryGenerator, column.sqlType),
+    'PATH',
+    queryGenerator.escape(column.path),
+    formatJsonTableBehavior(queryGenerator, 'EMPTY', column.onEmpty),
+    formatJsonTableBehavior(queryGenerator, 'ERROR', column.onError),
+  ]);
+}
+
+function parseMysqlVersion(version) {
+  const match = /^(\d+)\.(\d+)\.(\d+)/.exec(version);
+
+  if (!match) {
+    return null;
+  }
+
+  return match.slice(1).map(Number);
+}
+
+function isMysqlVersionLessThan(version, minimumVersion) {
+  const parsedVersion = parseMysqlVersion(version);
+  const parsedMinimumVersion = parseMysqlVersion(minimumVersion);
+
+  if (!parsedVersion || !parsedMinimumVersion) {
+    return false;
+  }
+
+  for (const [index, part] of parsedVersion.entries()) {
+    if (part < parsedMinimumVersion[index]) {
+      return true;
+    }
+
+    if (part > parsedMinimumVersion[index]) {
+      return false;
+    }
+  }
+
+  return false;
+}
+
+function assertJsonTableSupported(queryGenerator) {
+  if (!queryGenerator.dialect.supports.jsonTable) {
+    throw new Error(`JSON_TABLE is not supported in ${queryGenerator.dialect.name}.`);
+  }
+
+  const databaseVersion = queryGenerator.sequelize.getDatabaseVersionIfExist();
+
+  if (databaseVersion && isMysqlVersionLessThan(databaseVersion, JSON_TABLE_MINIMUM_VERSION)) {
+    throw new Error(
+      `JSON_TABLE requires MySQL ${JSON_TABLE_MINIMUM_VERSION} or newer, but the current database version is ${databaseVersion}.`,
+    );
+  }
+}
 
 export class MySqlQueryGenerator extends MySqlQueryGeneratorTypeScript {
   createTableQuery(tableName, attributes, options) {
@@ -263,6 +372,24 @@ export class MySqlQueryGenerator extends MySqlQueryGeneratorTypeScript {
     }
 
     return result;
+  }
+
+  jsonTable(expression, path, columns, options, escapeOptions) {
+    assertJsonTableSupported(this);
+
+    if (!options?.alias) {
+      throw new Error('JSON_TABLE requires an alias.');
+    }
+
+    if (columns.length === 0) {
+      throw new Error('JSON_TABLE requires at least one column definition.');
+    }
+
+    return joinSQLFragments([
+      `JSON_TABLE(${this.escape(expression, escapeOptions)}, ${this.escape(path)} COLUMNS (${columns.map(column => formatJsonTableColumn(this, column)).join(', ')}))`,
+      'AS',
+      this.quoteIdentifier(options.alias),
+    ]);
   }
 
   _getBeforeSelectAttributesFragment(options) {
