@@ -1,7 +1,10 @@
-import { EMPTY_ARRAY, EMPTY_OBJECT, shallowClonePojo } from '@sequelize/utils';
+import { EMPTY_ARRAY, EMPTY_OBJECT, find, shallowClonePojo } from '@sequelize/utils';
 import assert from 'node:assert';
 import { getBelongsToAssociationsWithTarget } from './_model-internals/get-belongs-to-associations-with-target.js';
+import { AbstractDataType } from './abstract-dialect/data-types/index.js';
 import type { BelongsToAssociation } from './associations/index.js';
+import { AggregateError } from './errors/index.js';
+import { BulkRecordError } from './errors/index.js';
 import { mayRunHook } from './hooks.js';
 import type { ModelDefinition } from './model-definition.js';
 import {
@@ -14,12 +17,14 @@ import {
 } from './model-internals.js';
 import type {
   BulkDestroyOptions,
+  BulkUpsertOptions,
   CommonDestroyOptions,
   DestroyManyOptions,
 } from './model-repository.types.js';
 import { ManualOnDelete } from './model-repository.types.js';
-import type { Model, Transactionable } from './model.js';
+import type { Attributes, CreationAttributes, Model, Transactionable } from './model.js';
 import { Op } from './operators.js';
+import { mapValueFieldNames } from './utils/format.js';
 
 /**
  * The goal of this class is to become the new home of all the static methods that are currently present on the Model class,
@@ -310,6 +315,200 @@ This would lead to an active record being associated with a deleted record.`);
         }
       }),
     );
+  }
+
+  async bulkUpsert(
+    records: ReadonlyArray<CreationAttributes<M>>,
+    options: BulkUpsertOptions<Attributes<M>> = {},
+  ): Promise<M[]> {
+    if (records.length === 0) {
+      return [];
+    }
+
+    const modelDefinition = this.#modelDefinition;
+    const model = modelDefinition.model;
+    const sequelize = this.#sequelize;
+    const now = new Date();
+
+    options = shallowClonePojo(options);
+    setTransactionFromCls(options, sequelize);
+
+    const createdAtAttr = modelDefinition.timestampAttributeNames.createdAt;
+    const updatedAtAttr = modelDefinition.timestampAttributeNames.updatedAt;
+    const allAttributeNames = Array.from(modelDefinition.attributes.keys());
+
+    options = {
+      validate: false,
+      hooks: true,
+      individualHooks: false,
+      returning: true,
+      fields: allAttributeNames as Array<keyof Attributes<M>>,
+      ...options,
+    };
+
+    if (
+      options.updateOnDuplicate !== undefined &&
+      (!Array.isArray(options.updateOnDuplicate) || options.updateOnDuplicate.length === 0)
+    ) {
+      throw new Error('updateOnDuplicate option only supports non-empty array.');
+    }
+
+    if (!options.updateOnDuplicate || options.updateOnDuplicate.length === 0) {
+      options.updateOnDuplicate = allAttributeNames
+        .filter(
+          attrName =>
+            attrName !== createdAtAttr &&
+            !modelDefinition.readOnlyAttributeNames.has(attrName),
+        ) as Array<keyof Attributes<M>>;
+    }
+
+    const instances = records.map(values =>
+      model.build(values, { isNewRecord: true }),
+    );
+
+    if (options.hooks !== false) {
+      await modelDefinition.hooks.runAsync('beforeBulkCreate', instances, options);
+    }
+
+    if (options.validate) {
+      const errors: BulkRecordError[] = [];
+      const validateOptions: Record<string, unknown> = {
+        ...options,
+        hooks: options.individualHooks,
+      };
+
+      await Promise.all(
+        instances.map(async instance => {
+          try {
+            await instance.validate(validateOptions);
+          } catch (error) {
+            errors.push(new BulkRecordError(error as Error, instance));
+          }
+        }),
+      );
+
+      if (errors.length > 0) {
+        throw new AggregateError(errors);
+      }
+    }
+
+    if (options.individualHooks) {
+      await Promise.all(
+        instances.map(async instance => {
+          await instance.save({
+            transaction: options.transaction,
+            logging: options.logging,
+          });
+        }),
+      );
+    } else {
+      const fields = options.fields!;
+
+      const fieldMappedRecords = instances.map(instance => {
+        const values: Record<string, unknown> = { ...instance.dataValues };
+
+        if (createdAtAttr && !values[createdAtAttr]) {
+          values[createdAtAttr] = now;
+        }
+
+        if (updatedAtAttr && !values[updatedAtAttr]) {
+          values[updatedAtAttr] = now;
+        }
+
+        const out = mapValueFieldNames(values, fields as Iterable<string>, model);
+        for (const key of modelDefinition.virtualAttributeNames) {
+          delete out[key];
+        }
+
+        return out;
+      });
+
+      const fieldMappedAttributes: Record<string, unknown> = {};
+      for (const attrName of Object.keys(model.tableAttributes)) {
+        const attribute = modelDefinition.attributes.get(attrName);
+        if (attribute) {
+          fieldMappedAttributes[attribute.columnName] = attribute;
+        }
+      }
+
+      const updateOnDuplicate = (options.updateOnDuplicate as Array<keyof Attributes<M>>).map(
+        attrName => modelDefinition.getColumnName(attrName as string),
+      );
+
+      let upsertKeys: string[];
+      if (options.conflictAttributes) {
+        upsertKeys = options.conflictAttributes.map(attrName =>
+          modelDefinition.getColumnName(attrName as string),
+        );
+      } else {
+        const keys: string[] = [];
+        for (const index of model.getIndexes()) {
+          if (index.unique && !index.where && index.fields) {
+            for (const field of index.fields) {
+              if (typeof field === 'string') {
+                keys.push(field);
+              }
+            }
+          }
+        }
+
+        upsertKeys =
+          keys.length > 0
+            ? keys
+            : Object.values(model.primaryKeys).map((pk: any) => pk.field);
+      }
+
+      const callOptions: Record<string, unknown> = {
+        ...options,
+        updateOnDuplicate,
+        upsertKeys,
+      };
+
+      if (callOptions.returning && Array.isArray(callOptions.returning)) {
+        callOptions.returning = (callOptions.returning as Array<string | unknown>).map(attr =>
+          modelDefinition.getColumnNameLoose(attr as string),
+        );
+      }
+
+      const results = await (this.#queryInterface as any).bulkInsert(
+        model.table,
+        fieldMappedRecords,
+        callOptions,
+        fieldMappedAttributes,
+      );
+
+      if (Array.isArray(results)) {
+        for (const [i, result] of (results as Array<Record<string, unknown>>).entries()) {
+          const instance = instances[i];
+          if (!instance) continue;
+
+          for (const key of Object.keys(result)) {
+            const value = result[key];
+            const attr = find(
+              modelDefinition.attributes.values(),
+              (attribute: any) =>
+                attribute.attributeName === key || attribute.columnName === key,
+            );
+            const attributeName = attr?.attributeName || key;
+            instance.dataValues[attributeName] =
+              value != null && attr?.type instanceof AbstractDataType
+                ? attr.type.parseDatabaseValue(value)
+                : value;
+            (instance as any)._previousDataValues[attributeName] =
+              instance.dataValues[attributeName];
+            instance.changed(attributeName, false);
+          }
+
+          instance.isNewRecord = false;
+        }
+      }
+    }
+
+    if (options.hooks !== false) {
+      await modelDefinition.hooks.runAsync('afterBulkCreate', instances, options);
+    }
+
+    return instances;
   }
 
   // async save(instances: M[] | M): Promise<void> {}
