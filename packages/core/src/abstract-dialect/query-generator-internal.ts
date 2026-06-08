@@ -11,6 +11,7 @@ import type { JsonPath } from '../expression-builders/json-path.js';
 import type { Literal } from '../expression-builders/literal.js';
 import type { Sequelize } from '../sequelize.js';
 import { extractModelDefinition } from '../utils/model-utils.js';
+import { parseAttributeSyntax } from '../utils/attribute-syntax.js';
 import { injectReplacements } from '../utils/sql.js';
 import { attributeTypeToSql } from './data-types-utils.js';
 import type { AbstractDialect } from './dialect.js';
@@ -336,7 +337,18 @@ Only named replacements (:name) are allowed in literal() because we cannot guara
     }
 
     // Weird legacy behavior
-    const identifiers = piece.identifiers.length === 1 ? piece.identifiers[0] : piece.identifiers;
+    let identifiers: string | string[] = piece.identifiers.length === 1 ? piece.identifiers[0] : piece.identifiers;
+    
+    // 检查单个标识符是否包含 JSON 路径
+    if (typeof identifiers === 'string') {
+      try {
+        // 使用现有的 parseAttributeSyntax 来解析它
+        const parsed = parseAttributeSyntax(identifiers);
+        return this.queryGenerator.formatSqlExpression(parsed, options);
+      } catch (error) {
+        // 如果解析失败，回退到原始行为
+      }
+    }
 
     // TODO: use quoteIdentifiers?
     // @ts-expect-error -- quote is declared on child class
