@@ -1,0 +1,117 @@
+diff --git a/packages/core/src/model.js b/packages/core/src/model.js
+index 6a2f98ada..21c926da5 100644
+--- a/packages/core/src/model.js
++++ b/packages/core/src/model.js
+@@ -1605,6 +1605,8 @@ ${associationOwner._getAssociationDebugList()}`);
+   static async aggregate(attribute, aggregateFunction, options) {
+     options = cloneDeep(options) ?? {};
+     options.model = this;
++    
++    setTransactionFromCls(options, this.sequelize);
+ 
+     // We need to preserve attributes here as the `injectScope` call would inject non aggregate columns.
+     const prevAttributes = options.attributes;
+@@ -2082,9 +2084,12 @@ ${associationOwner._getAssociationDebugList()}`);
+    * @returns {Promise<Model,boolean>}
+    */
+   static async findCreateFind(options) {
++    options = cloneDeep(options) ?? {};
+     if (!options || !options.where) {
+       throw new Error('Missing where attribute in the options parameter passed to findCreateFind.');
+     }
++    
++    setTransactionFromCls(options, this.sequelize);
+ 
+     let values = { ...options.defaults };
+     if (isPlainObject(options.where)) {
+diff --git a/packages/core/src/sequelize.js b/packages/core/src/sequelize.js
+index 763ad7383..ef4fb9b7d 100644
+--- a/packages/core/src/sequelize.js
++++ b/packages/core/src/sequelize.js
+@@ -226,6 +226,9 @@ export class Sequelize extends SequelizeTypeScript {
+   async query(sql, options) {
+     options = { ...this.options.query, ...options };
+ 
++    // Set transaction from CLS as early as possible
++    setTransactionFromCls(options, this);
++
+     if (sql instanceof BaseSqlExpression) {
+       sql = this.queryGenerator.formatSqlExpression(sql, options);
+     }
+@@ -260,6 +263,9 @@ Use Sequelize#query if you wish to use replacements.`);
+     }
+ 
+     options = { ...this.options.query, ...options, bindParameterOrder: null };
++    
++    // Set transaction from CLS as early as possible
++    setTransactionFromCls(options, this);
+ 
+     let bindParameters;
+     if (options.bind != null) {
+@@ -362,7 +368,6 @@ Use Sequelize#query if you wish to use replacements.`);
+       }
+     };
+ 
+-    setTransactionFromCls(options, this);
+     const retryOptions = { ...this.options.retry, ...options.retry };
+ 
+     return await retry(async () => {
+diff --git a/packages/core/src/transaction.ts b/packages/core/src/transaction.ts
+index 1ea26dfa8..dabf7be69 100644
+--- a/packages/core/src/transaction.ts
++++ b/packages/core/src/transaction.ts
+@@ -431,15 +431,47 @@ export class Transaction {
+   }
+ 
+   /**
+-   * Get the root transaction if nested, or self if this is a root transaction
+-   */
+-  get rootTransaction(): Transaction {
+-    if (this.parent !== null) {
+-      return this.parent.rootTransaction;
+-    }
++ * Get the root transaction if nested, or self if this is a root transaction
++ */
++get rootTransaction(): Transaction {
++  if (this.parent !== null) {
++    return this.parent.rootTransaction;
++  }
+ 
+-    return this;
++  return this;
++}
++
++/**
++ * Run a callback with this transaction as the current CLS context
++ * This ensures that nested async operations inherit the transaction context
++ * 
++ * @param callback The callback to run with the transaction context
++ */
++async run<T>(callback: (transaction: Transaction) => Promise<T> | T): Promise<T> {
++  const cls = this.sequelize['#transactionCls'];
++  if (!cls) {
++    return callback(this);
+   }
++
++  return cls.run(this, () => callback(this));
++}
++
++/**
++ * Bind a function to this transaction's CLS context
++ * This ensures that the function will always have access to the transaction context
++ * even when called asynchronously
++ * 
++ * @param fn The function to bind
++ * @returns A bound function that maintains the transaction context
++ */
++bind<T extends (...args: any[]) => any>(fn: T): T {
++  const cls = this.sequelize['#transactionCls'];
++  if (!cls) {
++    return fn;
++  }
++
++  return ((...args: any[]) => cls.run(this, () => fn(...args))) as T;
++}
+ }
+ 
+ /**

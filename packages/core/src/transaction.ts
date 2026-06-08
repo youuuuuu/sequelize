@@ -431,15 +431,47 @@ export class Transaction {
   }
 
   /**
-   * Get the root transaction if nested, or self if this is a root transaction
-   */
-  get rootTransaction(): Transaction {
-    if (this.parent !== null) {
-      return this.parent.rootTransaction;
-    }
-
-    return this;
+ * Get the root transaction if nested, or self if this is a root transaction
+ */
+get rootTransaction(): Transaction {
+  if (this.parent !== null) {
+    return this.parent.rootTransaction;
   }
+
+  return this;
+}
+
+/**
+ * Run a callback with this transaction as the current CLS context
+ * This ensures that nested async operations inherit the transaction context
+ * 
+ * @param callback The callback to run with the transaction context
+ */
+async run<T>(callback: (transaction: Transaction) => Promise<T> | T): Promise<T> {
+  const cls = this.sequelize['#transactionCls'];
+  if (!cls) {
+    return callback(this);
+  }
+
+  return cls.run(this, () => callback(this));
+}
+
+/**
+ * Bind a function to this transaction's CLS context
+ * This ensures that the function will always have access to the transaction context
+ * even when called asynchronously
+ * 
+ * @param fn The function to bind
+ * @returns A bound function that maintains the transaction context
+ */
+bind<T extends (...args: any[]) => any>(fn: T): T {
+  const cls = this.sequelize['#transactionCls'];
+  if (!cls) {
+    return fn;
+  }
+
+  return ((...args: any[]) => cls.run(this, () => fn(...args))) as T;
+}
 }
 
 /**

@@ -1605,6 +1605,8 @@ ${associationOwner._getAssociationDebugList()}`);
   static async aggregate(attribute, aggregateFunction, options) {
     options = cloneDeep(options) ?? {};
     options.model = this;
+    
+    setTransactionFromCls(options, this.sequelize);
 
     // We need to preserve attributes here as the `injectScope` call would inject non aggregate columns.
     const prevAttributes = options.attributes;
@@ -2082,9 +2084,12 @@ ${associationOwner._getAssociationDebugList()}`);
    * @returns {Promise<Model,boolean>}
    */
   static async findCreateFind(options) {
+    options = cloneDeep(options) ?? {};
     if (!options || !options.where) {
       throw new Error('Missing where attribute in the options parameter passed to findCreateFind.');
     }
+    
+    setTransactionFromCls(options, this.sequelize);
 
     let values = { ...options.defaults };
     if (isPlainObject(options.where)) {

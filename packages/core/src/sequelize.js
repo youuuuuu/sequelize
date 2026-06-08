@@ -226,6 +226,9 @@ export class Sequelize extends SequelizeTypeScript {
   async query(sql, options) {
     options = { ...this.options.query, ...options };
 
+    // Set transaction from CLS as early as possible
+    setTransactionFromCls(options, this);
+
     if (sql instanceof BaseSqlExpression) {
       sql = this.queryGenerator.formatSqlExpression(sql, options);
     }
@@ -260,6 +263,9 @@ Use Sequelize#query if you wish to use replacements.`);
     }
 
     options = { ...this.options.query, ...options, bindParameterOrder: null };
+    
+    // Set transaction from CLS as early as possible
+    setTransactionFromCls(options, this);
 
     let bindParameters;
     if (options.bind != null) {
@@ -362,7 +368,6 @@ Use Sequelize#query if you wish to use replacements.`);
       }
     };
 
-    setTransactionFromCls(options, this);
     const retryOptions = { ...this.options.retry, ...options.retry };
 
     return await retry(async () => {
