@@ -18,7 +18,7 @@ import type {
   DestroyManyOptions,
 } from './model-repository.types.js';
 import { ManualOnDelete } from './model-repository.types.js';
-import type { Model, Transactionable } from './model.js';
+import type { Attributes, BulkCreateOptions, CreationAttributes, Model, Transactionable } from './model.js';
 import { Op } from './operators.js';
 
 /**
@@ -319,6 +319,34 @@ This would lead to an active record being associated with a deleted record.`);
   // async restore(instances: M[] | M, options: unknown): Promise<number> {}
   // async bulkUpdate(options: unknown): Promise<M> {}
   // async bulkRestore(options: unknown): Promise<M> {}
+
+  async bulkUpsert(
+    records: ReadonlyArray<CreationAttributes<M>>,
+    options: BulkCreateOptions<Attributes<M>> = EMPTY_OBJECT,
+  ): Promise<M[]> {
+    const qi = this.#queryInterface as any;
+
+    const proxiedQueryInterface = new Proxy(qi, {
+      get(target, prop, receiver) {
+        if (prop === 'bulkInsert') {
+          // Redirect bulkInsert to bulkUpsert
+          return target.bulkUpsert.bind(target);
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+
+    const proxiedModel = new Proxy(this.#modelDefinition.model, {
+      get(target, prop, receiver) {
+        if (prop === 'queryInterface') {
+          return proxiedQueryInterface;
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+
+    return proxiedModel.bulkCreate(records, options);
+  }
 }
 
 const modelRepositories = new WeakMap<ModelDefinition, ModelRepository>();
