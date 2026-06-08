@@ -1,5 +1,5 @@
 import type { InferAttributes, InferCreationAttributes, ModelStatic } from '@sequelize/core';
-import { DataTypes, Model, QueryTypes } from '@sequelize/core';
+import { DataTypes, Model, QueryTypes, TransactionNestMode } from '@sequelize/core';
 import type { ModelHooks } from '@sequelize/core/_non-semver-use-at-your-own-risk_/model-hooks.js';
 import { expect } from 'chai';
 import delay from 'delay';
@@ -42,6 +42,14 @@ describe('AsyncLocalStorage (ContinuationLocalStorage) Transactions (CLS)', () =
   after(async () => {
     return vars.clsSequelize.close();
   });
+
+  const withManagedTimeout = async <T>(callback: () => Promise<T>): Promise<T> => {
+    return new Promise<T>((resolve, reject) => {
+      setTimeout(() => {
+        void callback().then(resolve, reject);
+      }, 0);
+    });
+  };
 
   describe('context', () => {
     it('does not use AsyncLocalStorage on manually managed transactions', async () => {
@@ -147,6 +155,97 @@ describe('AsyncLocalStorage (ContinuationLocalStorage) Transactions (CLS)', () =
     });
   });
 
+  describe('nested async context propagation', () => {
+    beforeEach(async () => {
+      await vars.User.truncate();
+    });
+
+    it('automatically uses the transaction for static and instance model methods in Promise.all and setTimeout', async () => {
+      await vars.clsSequelize.transaction(async transaction => {
+        const user = await withManagedTimeout(async () => {
+          expect(vars.clsSequelize.getCurrentClsTransaction()).to.equal(transaction);
+
+          return vars.User.create({ name: 'bob' });
+        });
+
+        await Promise.all([
+          withManagedTimeout(async () => {
+            expect(vars.clsSequelize.getCurrentClsTransaction()).to.equal(transaction);
+            user.name = 'alice';
+            await user.save();
+          }),
+          withManagedTimeout(async () => {
+            expect(vars.clsSequelize.getCurrentClsTransaction()).to.equal(transaction);
+            expect(await vars.User.count()).to.equal(1);
+          }),
+        ]);
+
+        expect(await vars.User.findAll()).to.have.length(1);
+        expect((await vars.User.findOne())?.name).to.equal('alice');
+        expect(await vars.User.findAll({ transaction: null })).to.have.length(0);
+      });
+
+      expect(await vars.User.findAll()).to.have.length(1);
+      expect((await vars.User.findOne())?.name).to.equal('alice');
+    });
+
+    it('propagates the correct transaction through nested savepoints', async () => {
+      await vars.clsSequelize.transaction(async outerTransaction => {
+        expect(vars.clsSequelize.getCurrentClsTransaction()).to.equal(outerTransaction);
+
+        await vars.clsSequelize.transaction(
+          { transaction: outerTransaction, nestMode: TransactionNestMode.savepoint },
+          async innerTransaction => {
+            await withManagedTimeout(async () => {
+              expect(vars.clsSequelize.getCurrentClsTransaction()).to.equal(innerTransaction);
+              await vars.User.create({ name: 'inner' });
+            });
+          },
+        );
+
+        expect(vars.clsSequelize.getCurrentClsTransaction()).to.equal(outerTransaction);
+        expect(await vars.User.count()).to.equal(1);
+        expect(await vars.User.count({ transaction: null })).to.equal(0);
+      });
+
+      expect(await vars.User.count()).to.equal(1);
+    });
+
+    if (sequelize.dialect.name !== 'sqlite3') {
+      it('prefers manually passed transactions over the CLS transaction', async () => {
+        const manualTransaction = await vars.clsSequelize.startUnmanagedTransaction();
+
+        try {
+          await vars.clsSequelize.transaction(async () => {
+            await vars.User.create({ name: 'manual' }, { transaction: manualTransaction });
+
+            expect(await vars.User.count()).to.equal(0);
+            expect(await vars.User.count({ transaction: manualTransaction })).to.equal(1);
+            expect(await vars.User.count({ transaction: null })).to.equal(0);
+          });
+
+          await manualTransaction.commit();
+          expect(await vars.User.count()).to.equal(1);
+        } finally {
+          if (!manualTransaction.finished) {
+            await manualTransaction.rollback();
+          }
+        }
+      });
+    }
+
+    it('runs in autocommit mode when no CLS transaction is active', async () => {
+      expect(vars.clsSequelize.getCurrentClsTransaction()).to.equal(undefined);
+
+      await withManagedTimeout(async () => {
+        expect(vars.clsSequelize.getCurrentClsTransaction()).to.equal(undefined);
+        await vars.User.create({ name: 'outside' });
+      });
+
+      expect(await vars.User.count()).to.equal(1);
+    });
+  });
+
   describe('sequelize.query', () => {
     beforeEach(async () => {
       await vars.User.truncate();
@@ -168,6 +267,36 @@ describe('AsyncLocalStorage (ContinuationLocalStorage) Transactions (CLS)', () =
         await vars.User.create({ name: 'bob' });
         expect(await vars.User.findAll({ transaction: null })).to.have.length(0);
         expect(await vars.User.findAll({})).to.have.length(1);
+      });
+    });
+
+    it('automatically uses the transaction in raw queries inside Promise.all and setTimeout', async () => {
+      const quotedTable = vars.clsSequelize.queryGenerator.quoteTable(vars.User.table);
+
+      await vars.clsSequelize.transaction(async transaction => {
+        await vars.User.create({ name: 'bob' });
+
+        const [firstCount, secondCount] = await Promise.all([
+          withManagedTimeout(async () => {
+            expect(vars.clsSequelize.getCurrentClsTransaction()).to.equal(transaction);
+
+            return vars.clsSequelize.query(`SELECT count(*) AS count FROM ${quotedTable}`, {
+              plain: true,
+              type: QueryTypes.SELECT,
+            });
+          }),
+          withManagedTimeout(async () => {
+            expect(vars.clsSequelize.getCurrentClsTransaction()).to.equal(transaction);
+
+            return vars.clsSequelize.query(`SELECT count(*) AS count FROM ${quotedTable}`, {
+              plain: true,
+              type: QueryTypes.SELECT,
+            });
+          }),
+        ]);
+
+        expect(Number(firstCount.count)).to.equal(1);
+        expect(Number(secondCount.count)).to.equal(1);
       });
     });
   });

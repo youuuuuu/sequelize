@@ -50,6 +50,7 @@ import {
 } from './model-internals';
 import { ModelTypeScript } from './model-typescript';
 import { Op } from './operators';
+import { bindTransactionToAsyncContext } from './transaction.js';
 import { intersects } from './utils/array';
 import {
   noDoubleNestedGroup,
@@ -126,6 +127,11 @@ const nonCascadingOptions = [
  * Do not expose.
  */
 const CONSTRUCTOR_SECRET = Symbol('model-constructor-secret');
+
+function setTransactionFromClsAndBindContext(options, sequelize) {
+  setTransactionFromCls(options, sequelize);
+  bindTransactionToAsyncContext(options.transaction, sequelize);
+}
 
 /**
  * A Model represents a table in the database. Instances of this class represent a database row.
@@ -1367,7 +1373,7 @@ ${associationOwner._getAssociationDebugList()}`);
     tableNames[this.table] = true;
     options = cloneDeep(options) ?? {};
 
-    setTransactionFromCls(options, this.sequelize);
+    setTransactionFromClsAndBindContext(options, this.sequelize);
 
     defaultsLodash(options, { hooks: true, model: this });
 
@@ -1606,6 +1612,8 @@ ${associationOwner._getAssociationDebugList()}`);
     options = cloneDeep(options) ?? {};
     options.model = this;
 
+    setTransactionFromClsAndBindContext(options, this.sequelize);
+
     // We need to preserve attributes here as the `injectScope` call would inject non aggregate columns.
     const prevAttributes = options.attributes;
     this._injectScope(options);
@@ -1669,7 +1677,7 @@ ${associationOwner._getAssociationDebugList()}`);
     options = cloneDeep(options) ?? {};
     options = defaultsLodash(options, { hooks: true });
 
-    setTransactionFromCls(options, this.sequelize);
+    setTransactionFromClsAndBindContext(options, this.sequelize);
 
     options.raw = true;
     if (options.hooks) {
@@ -1773,7 +1781,10 @@ ${associationOwner._getAssociationDebugList()}`);
       );
     }
 
-    const countOptions = cloneDeep(options) ?? {};
+    options = cloneDeep(options) ?? {};
+    setTransactionFromClsAndBindContext(options, this.sequelize);
+
+    const countOptions = cloneDeep(options);
 
     if (countOptions.attributes && !options.countGroupedRows) {
       countOptions.attributes = undefined;
@@ -1892,6 +1903,7 @@ ${associationOwner._getAssociationDebugList()}`);
    */
   static async create(values, options) {
     options = cloneDeep(options) ?? {};
+    setTransactionFromClsAndBindContext(options, this.sequelize);
 
     return await this.build(values, {
       isNewRecord: true,
@@ -1916,6 +1928,9 @@ ${associationOwner._getAssociationDebugList()}`);
           'Please note that the API has changed, and is now options only (an object with where, defaults keys, transaction etc.)',
       );
     }
+
+    options = { ...options };
+    setTransactionFromClsAndBindContext(options, this.sequelize);
 
     let values;
 
@@ -1980,7 +1995,7 @@ ${associationOwner._getAssociationDebugList()}`);
       }
     }
 
-    setTransactionFromCls(options, this.sequelize);
+    setTransactionFromClsAndBindContext(options, this.sequelize);
 
     const internalTransaction = !options.transaction;
     let values;
@@ -2086,6 +2101,9 @@ ${associationOwner._getAssociationDebugList()}`);
       throw new Error('Missing where attribute in the options parameter passed to findCreateFind.');
     }
 
+    options = { ...options };
+    setTransactionFromClsAndBindContext(options, this.sequelize);
+
     let values = { ...options.defaults };
     if (isPlainObject(options.where)) {
       values = defaults(values, options.where);
@@ -2155,7 +2173,7 @@ ${associationOwner._getAssociationDebugList()}`);
       ...cloneDeep(options),
     };
 
-    setTransactionFromCls(options, this.sequelize);
+    setTransactionFromClsAndBindContext(options, this.sequelize);
 
     const modelDefinition = this.modelDefinition;
 
@@ -2279,7 +2297,7 @@ ${associationOwner._getAssociationDebugList()}`);
     const now = new Date();
     options = cloneDeep(options) ?? {};
 
-    setTransactionFromCls(options, this.sequelize);
+    setTransactionFromClsAndBindContext(options, this.sequelize);
 
     options.model = this;
 
@@ -2703,6 +2721,9 @@ ${associationOwner._getAssociationDebugList()}`);
    * @returns {Promise}
    */
   static async truncate(options) {
+    options = cloneDeep(options) ?? {};
+    setTransactionFromClsAndBindContext(options, this.sequelize);
+
     await this.queryInterface.truncate(this, options);
   }
 
@@ -2718,7 +2739,7 @@ ${associationOwner._getAssociationDebugList()}`);
   static async destroy(options) {
     options = cloneDeep(options) ?? {};
 
-    setTransactionFromCls(options, this.sequelize);
+    setTransactionFromClsAndBindContext(options, this.sequelize);
 
     this._injectScope(options);
 
@@ -2836,7 +2857,7 @@ ${associationOwner._getAssociationDebugList()}`);
       ...options,
     };
 
-    setTransactionFromCls(options, this.sequelize);
+    setTransactionFromClsAndBindContext(options, this.sequelize);
 
     options.type = QueryTypes.RAW;
     options.model = this;
@@ -2914,7 +2935,7 @@ ${associationOwner._getAssociationDebugList()}`);
   static async update(values, options) {
     options = cloneDeep(options) ?? {};
 
-    setTransactionFromCls(options, this.sequelize);
+    setTransactionFromClsAndBindContext(options, this.sequelize);
 
     this._injectScope(options);
     this._optionsMustContainWhere(options);
@@ -3132,10 +3153,13 @@ ${associationOwner._getAssociationDebugList()}`);
   // TODO: move "schema" to options
   static async describe(schema, options) {
     const table = this.modelDefinition.table;
+    const describeOptions = cloneDeep(options) ?? {};
+
+    setTransactionFromClsAndBindContext(describeOptions, this.sequelize);
 
     return await this.queryInterface.describeTable(
       { ...table, schema: schema || table.schema },
-      options,
+      describeOptions,
     );
   }
 
@@ -3259,7 +3283,9 @@ Instead of specifying a Model, either:
    *   whenever supported by dialect
    */
   static async increment(fields, options) {
-    options ||= {};
+    options = cloneDeep(options) ?? {};
+    setTransactionFromClsAndBindContext(options, this.sequelize);
+
     if (typeof fields === 'string') {
       fields = [fields];
     }
@@ -3880,7 +3906,7 @@ Instead of specifying a Model, either:
       validate: true,
     });
 
-    setTransactionFromCls(options, this.sequelize);
+    setTransactionFromClsAndBindContext(options, this.sequelize);
 
     const modelDefinition = this.modelDefinition;
 
@@ -4236,6 +4262,8 @@ Instead of specifying a Model, either:
       include: this._options.include || undefined,
     });
 
+    setTransactionFromClsAndBindContext(options, this.sequelize);
+
     const reloaded = await this.constructor.findOne(options);
     if (!reloaded) {
       throw new SequelizeErrors.InstanceError(
@@ -4322,7 +4350,7 @@ Instead of specifying a Model, either:
       ...options,
     };
 
-    setTransactionFromCls(options, this.sequelize);
+    setTransactionFromClsAndBindContext(options, this.sequelize);
 
     const modelDefinition = this.modelDefinition;
 
@@ -4410,7 +4438,7 @@ Instead of specifying a Model, either:
       ...options,
     };
 
-    setTransactionFromCls(options, this.sequelize);
+    setTransactionFromClsAndBindContext(options, this.sequelize);
 
     // Run before hook
     if (options.hooks) {

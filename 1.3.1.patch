@@ -1,0 +1,549 @@
+diff --git a/packages/core/src/model.js b/packages/core/src/model.js
+index 6a2f98ada..9414764e1 100644
+--- a/packages/core/src/model.js
++++ b/packages/core/src/model.js
+@@ -50,6 +50,7 @@ import {
+ } from './model-internals';
+ import { ModelTypeScript } from './model-typescript';
+ import { Op } from './operators';
++import { bindTransactionToAsyncContext } from './transaction.js';
+ import { intersects } from './utils/array';
+ import {
+   noDoubleNestedGroup,
+@@ -127,6 +128,11 @@ const nonCascadingOptions = [
+  */
+ const CONSTRUCTOR_SECRET = Symbol('model-constructor-secret');
+ 
++function setTransactionFromClsAndBindContext(options, sequelize) {
++  setTransactionFromCls(options, sequelize);
++  bindTransactionToAsyncContext(options.transaction, sequelize);
++}
++
+ /**
+  * A Model represents a table in the database. Instances of this class represent a database row.
+  *
+@@ -1367,7 +1373,7 @@ ${associationOwner._getAssociationDebugList()}`);
+     tableNames[this.table] = true;
+     options = cloneDeep(options) ?? {};
+ 
+-    setTransactionFromCls(options, this.sequelize);
++    setTransactionFromClsAndBindContext(options, this.sequelize);
+ 
+     defaultsLodash(options, { hooks: true, model: this });
+ 
+@@ -1606,6 +1612,8 @@ ${associationOwner._getAssociationDebugList()}`);
+     options = cloneDeep(options) ?? {};
+     options.model = this;
+ 
++    setTransactionFromClsAndBindContext(options, this.sequelize);
++
+     // We need to preserve attributes here as the `injectScope` call would inject non aggregate columns.
+     const prevAttributes = options.attributes;
+     this._injectScope(options);
+@@ -1669,7 +1677,7 @@ ${associationOwner._getAssociationDebugList()}`);
+     options = cloneDeep(options) ?? {};
+     options = defaultsLodash(options, { hooks: true });
+ 
+-    setTransactionFromCls(options, this.sequelize);
++    setTransactionFromClsAndBindContext(options, this.sequelize);
+ 
+     options.raw = true;
+     if (options.hooks) {
+@@ -1773,7 +1781,10 @@ ${associationOwner._getAssociationDebugList()}`);
+       );
+     }
+ 
+-    const countOptions = cloneDeep(options) ?? {};
++    options = cloneDeep(options) ?? {};
++    setTransactionFromClsAndBindContext(options, this.sequelize);
++
++    const countOptions = cloneDeep(options);
+ 
+     if (countOptions.attributes && !options.countGroupedRows) {
+       countOptions.attributes = undefined;
+@@ -1892,6 +1903,7 @@ ${associationOwner._getAssociationDebugList()}`);
+    */
+   static async create(values, options) {
+     options = cloneDeep(options) ?? {};
++    setTransactionFromClsAndBindContext(options, this.sequelize);
+ 
+     return await this.build(values, {
+       isNewRecord: true,
+@@ -1917,6 +1929,9 @@ ${associationOwner._getAssociationDebugList()}`);
+       );
+     }
+ 
++    options = { ...options };
++    setTransactionFromClsAndBindContext(options, this.sequelize);
++
+     let values;
+ 
+     let instance = await this.findOne(options);
+@@ -1980,7 +1995,7 @@ ${associationOwner._getAssociationDebugList()}`);
+       }
+     }
+ 
+-    setTransactionFromCls(options, this.sequelize);
++    setTransactionFromClsAndBindContext(options, this.sequelize);
+ 
+     const internalTransaction = !options.transaction;
+     let values;
+@@ -2086,6 +2101,9 @@ ${associationOwner._getAssociationDebugList()}`);
+       throw new Error('Missing where attribute in the options parameter passed to findCreateFind.');
+     }
+ 
++    options = { ...options };
++    setTransactionFromClsAndBindContext(options, this.sequelize);
++
+     let values = { ...options.defaults };
+     if (isPlainObject(options.where)) {
+       values = defaults(values, options.where);
+@@ -2155,7 +2173,7 @@ ${associationOwner._getAssociationDebugList()}`);
+       ...cloneDeep(options),
+     };
+ 
+-    setTransactionFromCls(options, this.sequelize);
++    setTransactionFromClsAndBindContext(options, this.sequelize);
+ 
+     const modelDefinition = this.modelDefinition;
+ 
+@@ -2279,7 +2297,7 @@ ${associationOwner._getAssociationDebugList()}`);
+     const now = new Date();
+     options = cloneDeep(options) ?? {};
+ 
+-    setTransactionFromCls(options, this.sequelize);
++    setTransactionFromClsAndBindContext(options, this.sequelize);
+ 
+     options.model = this;
+ 
+@@ -2703,6 +2721,9 @@ ${associationOwner._getAssociationDebugList()}`);
+    * @returns {Promise}
+    */
+   static async truncate(options) {
++    options = cloneDeep(options) ?? {};
++    setTransactionFromClsAndBindContext(options, this.sequelize);
++
+     await this.queryInterface.truncate(this, options);
+   }
+ 
+@@ -2718,7 +2739,7 @@ ${associationOwner._getAssociationDebugList()}`);
+   static async destroy(options) {
+     options = cloneDeep(options) ?? {};
+ 
+-    setTransactionFromCls(options, this.sequelize);
++    setTransactionFromClsAndBindContext(options, this.sequelize);
+ 
+     this._injectScope(options);
+ 
+@@ -2836,7 +2857,7 @@ ${associationOwner._getAssociationDebugList()}`);
+       ...options,
+     };
+ 
+-    setTransactionFromCls(options, this.sequelize);
++    setTransactionFromClsAndBindContext(options, this.sequelize);
+ 
+     options.type = QueryTypes.RAW;
+     options.model = this;
+@@ -2914,7 +2935,7 @@ ${associationOwner._getAssociationDebugList()}`);
+   static async update(values, options) {
+     options = cloneDeep(options) ?? {};
+ 
+-    setTransactionFromCls(options, this.sequelize);
++    setTransactionFromClsAndBindContext(options, this.sequelize);
+ 
+     this._injectScope(options);
+     this._optionsMustContainWhere(options);
+@@ -3132,10 +3153,13 @@ ${associationOwner._getAssociationDebugList()}`);
+   // TODO: move "schema" to options
+   static async describe(schema, options) {
+     const table = this.modelDefinition.table;
++    const describeOptions = cloneDeep(options) ?? {};
++
++    setTransactionFromClsAndBindContext(describeOptions, this.sequelize);
+ 
+     return await this.queryInterface.describeTable(
+       { ...table, schema: schema || table.schema },
+-      options,
++      describeOptions,
+     );
+   }
+ 
+@@ -3259,7 +3283,9 @@ Instead of specifying a Model, either:
+    *   whenever supported by dialect
+    */
+   static async increment(fields, options) {
+-    options ||= {};
++    options = cloneDeep(options) ?? {};
++    setTransactionFromClsAndBindContext(options, this.sequelize);
++
+     if (typeof fields === 'string') {
+       fields = [fields];
+     }
+@@ -3880,7 +3906,7 @@ Instead of specifying a Model, either:
+       validate: true,
+     });
+ 
+-    setTransactionFromCls(options, this.sequelize);
++    setTransactionFromClsAndBindContext(options, this.sequelize);
+ 
+     const modelDefinition = this.modelDefinition;
+ 
+@@ -4236,6 +4262,8 @@ Instead of specifying a Model, either:
+       include: this._options.include || undefined,
+     });
+ 
++    setTransactionFromClsAndBindContext(options, this.sequelize);
++
+     const reloaded = await this.constructor.findOne(options);
+     if (!reloaded) {
+       throw new SequelizeErrors.InstanceError(
+@@ -4322,7 +4350,7 @@ Instead of specifying a Model, either:
+       ...options,
+     };
+ 
+-    setTransactionFromCls(options, this.sequelize);
++    setTransactionFromClsAndBindContext(options, this.sequelize);
+ 
+     const modelDefinition = this.modelDefinition;
+ 
+@@ -4410,7 +4438,7 @@ Instead of specifying a Model, either:
+       ...options,
+     };
+ 
+-    setTransactionFromCls(options, this.sequelize);
++    setTransactionFromClsAndBindContext(options, this.sequelize);
+ 
+     // Run before hook
+     if (options.hooks) {
+diff --git a/packages/core/src/sequelize.js b/packages/core/src/sequelize.js
+index 763ad7383..37b7e74a9 100644
+--- a/packages/core/src/sequelize.js
++++ b/packages/core/src/sequelize.js
+@@ -41,9 +41,11 @@ import { ManualOnDelete } from './model-repository.types.js';
+ import { Op } from './operators';
+ import { SequelizeTypeScript } from './sequelize-typescript';
+ import {
++  bindTransactionToAsyncContext,
+   COMPLETES_TRANSACTION,
+   IsolationLevel,
+   Lock,
++  runWithTransactionAsyncContext,
+   Transaction,
+   TransactionNestMode,
+   TransactionType,
+@@ -226,6 +228,9 @@ export class Sequelize extends SequelizeTypeScript {
+   async query(sql, options) {
+     options = { ...this.options.query, ...options };
+ 
++    setTransactionFromCls(options, this);
++    bindTransactionToAsyncContext(options.transaction, this);
++
+     if (sql instanceof BaseSqlExpression) {
+       sql = this.queryGenerator.formatSqlExpression(sql, options);
+     }
+@@ -261,6 +266,9 @@ Use Sequelize#query if you wish to use replacements.`);
+ 
+     options = { ...this.options.query, ...options, bindParameterOrder: null };
+ 
++    setTransactionFromCls(options, this);
++    bindTransactionToAsyncContext(options.transaction, this);
++
+     let bindParameters;
+     if (options.bind != null) {
+       const isBindArray = Array.isArray(options.bind);
+@@ -362,39 +370,43 @@ Use Sequelize#query if you wish to use replacements.`);
+       }
+     };
+ 
+-    setTransactionFromCls(options, this);
+     const retryOptions = { ...this.options.retry, ...options.retry };
+ 
+-    return await retry(async () => {
+-      checkTransaction();
+-
+-      const connection = options.transaction
+-        ? options.transaction.getConnection()
+-        : options.connection
+-          ? options.connection
+-          : await this.pool.acquire({
+-              useMaster: options.useMaster,
+-              type: options.type === 'SELECT' ? 'read' : 'write',
+-            });
+-
+-      if (this.dialect.name === 'db2' && options.alter && options.alter.drop === false) {
+-        connection.dropTable = false;
+-      }
++    return await retry(
++      async () => {
++        return runWithTransactionAsyncContext(options.transaction, async () => {
++          checkTransaction();
++
++          const connection = options.transaction
++            ? options.transaction.getConnection()
++            : options.connection
++              ? options.connection
++              : await this.pool.acquire({
++                  useMaster: options.useMaster,
++                  type: options.type === 'SELECT' ? 'read' : 'write',
++                });
++
++          if (this.dialect.name === 'db2' && options.alter && options.alter.drop === false) {
++            connection.dropTable = false;
++          }
+ 
+-      const query = new this.dialect.Query(connection, this, options);
++          const query = new this.dialect.Query(connection, this, options);
+ 
+-      try {
+-        await this.hooks.runAsync('beforeQuery', options, query);
+-        checkTransaction();
++          try {
++            await this.hooks.runAsync('beforeQuery', options, query);
++            checkTransaction();
+ 
+-        return await query.run(sql, bindParameters, { minifyAliases: options.minifyAliases });
+-      } finally {
+-        await this.hooks.runAsync('afterQuery', options, query);
+-        if (!options.transaction && !options.connection) {
+-          this.pool.release(connection);
+-        }
+-      }
+-    }, retryOptions);
++            return await query.run(sql, bindParameters, { minifyAliases: options.minifyAliases });
++          } finally {
++            await this.hooks.runAsync('afterQuery', options, query);
++            if (!options.transaction && !options.connection) {
++              this.pool.release(connection);
++            }
++          }
++        });
++      },
++      retryOptions,
++    );
+   }
+ 
+   /**
+diff --git a/packages/core/src/transaction.ts b/packages/core/src/transaction.ts
+index 1ea26dfa8..8707da15e 100644
+--- a/packages/core/src/transaction.ts
++++ b/packages/core/src/transaction.ts
+@@ -1,10 +1,14 @@
+ import type { StrictRequiredBy } from '@sequelize/utils';
+ import { EMPTY_OBJECT } from '@sequelize/utils';
++import { AsyncLocalStorage } from 'node:async_hooks';
+ import assert from 'node:assert';
+ import type { Class } from 'type-fest';
+ import type { AbstractConnection, ConstraintChecking, Logging, Sequelize } from './index.js';
+ 
+ type TransactionCallback = (transaction: Transaction) => void | Promise<void>;
++type TransactionAsyncContext = <T>(callback: () => T) => T;
++
++const TRANSACTION_ASYNC_CONTEXT = Symbol('transactionAsyncContext');
+ 
+ /**
+  * This an option for {@link QueryRawOptions} which indicates if the query completes the transaction
+@@ -24,6 +28,8 @@ export const COMPLETES_TRANSACTION = Symbol('completesTransaction');
+ export class Transaction {
+   sequelize: Sequelize;
+ 
++  [TRANSACTION_ASYNC_CONTEXT]?: TransactionAsyncContext;
++
+   readonly #afterCommitHooks = new Set<TransactionCallback>();
+   readonly #afterRollbackHooks = new Set<TransactionCallback>();
+   readonly #afterHooks = new Set<TransactionCallback>();
+@@ -599,6 +605,34 @@ export interface ManagedTransactionOptions extends TransactionOptions {
+   nestMode?: TransactionNestMode;
+ }
+ 
++export function bindTransactionToAsyncContext(
++  transaction: Transaction | null | undefined,
++  sequelize: Sequelize,
++): void {
++  if (!transaction || transaction[TRANSACTION_ASYNC_CONTEXT]) {
++    return;
++  }
++
++  if (sequelize.getCurrentClsTransaction() !== transaction) {
++    return;
++  }
++
++  transaction[TRANSACTION_ASYNC_CONTEXT] = AsyncLocalStorage.snapshot();
++}
++
++export function runWithTransactionAsyncContext<T>(
++  transaction: Transaction | null | undefined,
++  callback: () => T,
++): T {
++  const runInAsyncContext = transaction?.[TRANSACTION_ASYNC_CONTEXT];
++
++  if (!runInAsyncContext) {
++    return callback();
++  }
++
++  return runInAsyncContext(callback);
++}
++
+ export function normalizeTransactionOptions(
+   sequelize: Sequelize,
+   options: TransactionOptions = EMPTY_OBJECT,
+diff --git a/packages/core/test/integration/cls.test.ts b/packages/core/test/integration/cls.test.ts
+index 161c73420..fea2b85ec 100644
+--- a/packages/core/test/integration/cls.test.ts
++++ b/packages/core/test/integration/cls.test.ts
+@@ -1,5 +1,5 @@
+ import type { InferAttributes, InferCreationAttributes, ModelStatic } from '@sequelize/core';
+-import { DataTypes, Model, QueryTypes } from '@sequelize/core';
++import { DataTypes, Model, QueryTypes, TransactionNestMode } from '@sequelize/core';
+ import type { ModelHooks } from '@sequelize/core/_non-semver-use-at-your-own-risk_/model-hooks.js';
+ import { expect } from 'chai';
+ import delay from 'delay';
+@@ -43,6 +43,14 @@ describe('AsyncLocalStorage (ContinuationLocalStorage) Transactions (CLS)', () =
+     return vars.clsSequelize.close();
+   });
+ 
++  const withManagedTimeout = async <T>(callback: () => Promise<T>): Promise<T> => {
++    return new Promise<T>((resolve, reject) => {
++      setTimeout(() => {
++        void callback().then(resolve, reject);
++      }, 0);
++    });
++  };
++
+   describe('context', () => {
+     it('does not use AsyncLocalStorage on manually managed transactions', async () => {
+       const transaction = await vars.clsSequelize.startUnmanagedTransaction();
+@@ -147,6 +155,97 @@ describe('AsyncLocalStorage (ContinuationLocalStorage) Transactions (CLS)', () =
+     });
+   });
+ 
++  describe('nested async context propagation', () => {
++    beforeEach(async () => {
++      await vars.User.truncate();
++    });
++
++    it('automatically uses the transaction for static and instance model methods in Promise.all and setTimeout', async () => {
++      await vars.clsSequelize.transaction(async transaction => {
++        const user = await withManagedTimeout(async () => {
++          expect(vars.clsSequelize.getCurrentClsTransaction()).to.equal(transaction);
++
++          return vars.User.create({ name: 'bob' });
++        });
++
++        await Promise.all([
++          withManagedTimeout(async () => {
++            expect(vars.clsSequelize.getCurrentClsTransaction()).to.equal(transaction);
++            user.name = 'alice';
++            await user.save();
++          }),
++          withManagedTimeout(async () => {
++            expect(vars.clsSequelize.getCurrentClsTransaction()).to.equal(transaction);
++            expect(await vars.User.count()).to.equal(1);
++          }),
++        ]);
++
++        expect(await vars.User.findAll()).to.have.length(1);
++        expect((await vars.User.findOne())?.name).to.equal('alice');
++        expect(await vars.User.findAll({ transaction: null })).to.have.length(0);
++      });
++
++      expect(await vars.User.findAll()).to.have.length(1);
++      expect((await vars.User.findOne())?.name).to.equal('alice');
++    });
++
++    it('propagates the correct transaction through nested savepoints', async () => {
++      await vars.clsSequelize.transaction(async outerTransaction => {
++        expect(vars.clsSequelize.getCurrentClsTransaction()).to.equal(outerTransaction);
++
++        await vars.clsSequelize.transaction(
++          { transaction: outerTransaction, nestMode: TransactionNestMode.savepoint },
++          async innerTransaction => {
++            await withManagedTimeout(async () => {
++              expect(vars.clsSequelize.getCurrentClsTransaction()).to.equal(innerTransaction);
++              await vars.User.create({ name: 'inner' });
++            });
++          },
++        );
++
++        expect(vars.clsSequelize.getCurrentClsTransaction()).to.equal(outerTransaction);
++        expect(await vars.User.count()).to.equal(1);
++        expect(await vars.User.count({ transaction: null })).to.equal(0);
++      });
++
++      expect(await vars.User.count()).to.equal(1);
++    });
++
++    if (sequelize.dialect.name !== 'sqlite3') {
++      it('prefers manually passed transactions over the CLS transaction', async () => {
++        const manualTransaction = await vars.clsSequelize.startUnmanagedTransaction();
++
++        try {
++          await vars.clsSequelize.transaction(async () => {
++            await vars.User.create({ name: 'manual' }, { transaction: manualTransaction });
++
++            expect(await vars.User.count()).to.equal(0);
++            expect(await vars.User.count({ transaction: manualTransaction })).to.equal(1);
++            expect(await vars.User.count({ transaction: null })).to.equal(0);
++          });
++
++          await manualTransaction.commit();
++          expect(await vars.User.count()).to.equal(1);
++        } finally {
++          if (!manualTransaction.finished) {
++            await manualTransaction.rollback();
++          }
++        }
++      });
++    }
++
++    it('runs in autocommit mode when no CLS transaction is active', async () => {
++      expect(vars.clsSequelize.getCurrentClsTransaction()).to.equal(undefined);
++
++      await withManagedTimeout(async () => {
++        expect(vars.clsSequelize.getCurrentClsTransaction()).to.equal(undefined);
++        await vars.User.create({ name: 'outside' });
++      });
++
++      expect(await vars.User.count()).to.equal(1);
++    });
++  });
++
+   describe('sequelize.query', () => {
+     beforeEach(async () => {
+       await vars.User.truncate();
+@@ -170,6 +269,36 @@ describe('AsyncLocalStorage (ContinuationLocalStorage) Transactions (CLS)', () =
+         expect(await vars.User.findAll({})).to.have.length(1);
+       });
+     });
++
++    it('automatically uses the transaction in raw queries inside Promise.all and setTimeout', async () => {
++      const quotedTable = vars.clsSequelize.queryGenerator.quoteTable(vars.User.table);
++
++      await vars.clsSequelize.transaction(async transaction => {
++        await vars.User.create({ name: 'bob' });
++
++        const [firstCount, secondCount] = await Promise.all([
++          withManagedTimeout(async () => {
++            expect(vars.clsSequelize.getCurrentClsTransaction()).to.equal(transaction);
++
++            return vars.clsSequelize.query(`SELECT count(*) AS count FROM ${quotedTable}`, {
++              plain: true,
++              type: QueryTypes.SELECT,
++            });
++          }),
++          withManagedTimeout(async () => {
++            expect(vars.clsSequelize.getCurrentClsTransaction()).to.equal(transaction);
++
++            return vars.clsSequelize.query(`SELECT count(*) AS count FROM ${quotedTable}`, {
++              plain: true,
++              type: QueryTypes.SELECT,
++            });
++          }),
++        ]);
++
++        expect(Number(firstCount.count)).to.equal(1);
++        expect(Number(secondCount.count)).to.equal(1);
++      });
++    });
+   });
+ 
+   it('promises returned by sequelize.query are correctly patched', async () => {

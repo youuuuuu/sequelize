@@ -1,10 +1,14 @@
 import type { StrictRequiredBy } from '@sequelize/utils';
 import { EMPTY_OBJECT } from '@sequelize/utils';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import assert from 'node:assert';
 import type { Class } from 'type-fest';
 import type { AbstractConnection, ConstraintChecking, Logging, Sequelize } from './index.js';
 
 type TransactionCallback = (transaction: Transaction) => void | Promise<void>;
+type TransactionAsyncContext = <T>(callback: () => T) => T;
+
+const TRANSACTION_ASYNC_CONTEXT = Symbol('transactionAsyncContext');
 
 /**
  * This an option for {@link QueryRawOptions} which indicates if the query completes the transaction
@@ -23,6 +27,8 @@ export const COMPLETES_TRANSACTION = Symbol('completesTransaction');
  */
 export class Transaction {
   sequelize: Sequelize;
+
+  [TRANSACTION_ASYNC_CONTEXT]?: TransactionAsyncContext;
 
   readonly #afterCommitHooks = new Set<TransactionCallback>();
   readonly #afterRollbackHooks = new Set<TransactionCallback>();
@@ -597,6 +603,34 @@ export interface ManagedTransactionOptions extends TransactionOptions {
    * How the transaction block should behave if a parent transaction block exists.
    */
   nestMode?: TransactionNestMode;
+}
+
+export function bindTransactionToAsyncContext(
+  transaction: Transaction | null | undefined,
+  sequelize: Sequelize,
+): void {
+  if (!transaction || transaction[TRANSACTION_ASYNC_CONTEXT]) {
+    return;
+  }
+
+  if (sequelize.getCurrentClsTransaction() !== transaction) {
+    return;
+  }
+
+  transaction[TRANSACTION_ASYNC_CONTEXT] = AsyncLocalStorage.snapshot();
+}
+
+export function runWithTransactionAsyncContext<T>(
+  transaction: Transaction | null | undefined,
+  callback: () => T,
+): T {
+  const runInAsyncContext = transaction?.[TRANSACTION_ASYNC_CONTEXT];
+
+  if (!runInAsyncContext) {
+    return callback();
+  }
+
+  return runInAsyncContext(callback);
 }
 
 export function normalizeTransactionOptions(

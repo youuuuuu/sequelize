@@ -41,9 +41,11 @@ import { ManualOnDelete } from './model-repository.types.js';
 import { Op } from './operators';
 import { SequelizeTypeScript } from './sequelize-typescript';
 import {
+  bindTransactionToAsyncContext,
   COMPLETES_TRANSACTION,
   IsolationLevel,
   Lock,
+  runWithTransactionAsyncContext,
   Transaction,
   TransactionNestMode,
   TransactionType,
@@ -226,6 +228,9 @@ export class Sequelize extends SequelizeTypeScript {
   async query(sql, options) {
     options = { ...this.options.query, ...options };
 
+    setTransactionFromCls(options, this);
+    bindTransactionToAsyncContext(options.transaction, this);
+
     if (sql instanceof BaseSqlExpression) {
       sql = this.queryGenerator.formatSqlExpression(sql, options);
     }
@@ -260,6 +265,9 @@ Use Sequelize#query if you wish to use replacements.`);
     }
 
     options = { ...this.options.query, ...options, bindParameterOrder: null };
+
+    setTransactionFromCls(options, this);
+    bindTransactionToAsyncContext(options.transaction, this);
 
     let bindParameters;
     if (options.bind != null) {
@@ -362,39 +370,43 @@ Use Sequelize#query if you wish to use replacements.`);
       }
     };
 
-    setTransactionFromCls(options, this);
     const retryOptions = { ...this.options.retry, ...options.retry };
 
-    return await retry(async () => {
-      checkTransaction();
+    return await retry(
+      async () => {
+        return runWithTransactionAsyncContext(options.transaction, async () => {
+          checkTransaction();
 
-      const connection = options.transaction
-        ? options.transaction.getConnection()
-        : options.connection
-          ? options.connection
-          : await this.pool.acquire({
-              useMaster: options.useMaster,
-              type: options.type === 'SELECT' ? 'read' : 'write',
-            });
+          const connection = options.transaction
+            ? options.transaction.getConnection()
+            : options.connection
+              ? options.connection
+              : await this.pool.acquire({
+                  useMaster: options.useMaster,
+                  type: options.type === 'SELECT' ? 'read' : 'write',
+                });
 
-      if (this.dialect.name === 'db2' && options.alter && options.alter.drop === false) {
-        connection.dropTable = false;
-      }
+          if (this.dialect.name === 'db2' && options.alter && options.alter.drop === false) {
+            connection.dropTable = false;
+          }
 
-      const query = new this.dialect.Query(connection, this, options);
+          const query = new this.dialect.Query(connection, this, options);
 
-      try {
-        await this.hooks.runAsync('beforeQuery', options, query);
-        checkTransaction();
+          try {
+            await this.hooks.runAsync('beforeQuery', options, query);
+            checkTransaction();
 
-        return await query.run(sql, bindParameters, { minifyAliases: options.minifyAliases });
-      } finally {
-        await this.hooks.runAsync('afterQuery', options, query);
-        if (!options.transaction && !options.connection) {
-          this.pool.release(connection);
-        }
-      }
-    }, retryOptions);
+            return await query.run(sql, bindParameters, { minifyAliases: options.minifyAliases });
+          } finally {
+            await this.hooks.runAsync('afterQuery', options, query);
+            if (!options.transaction && !options.connection) {
+              this.pool.release(connection);
+            }
+          }
+        });
+      },
+      retryOptions,
+    );
   }
 
   /**
