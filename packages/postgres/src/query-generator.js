@@ -41,6 +41,13 @@ export class PostgresQueryGenerator extends PostgresQueryGeneratorTypeScript {
     return `SET search_path to ${searchPath};`;
   }
 
+  _whereJsonContains(key, value) {
+    if (typeof value === 'string') {
+      value = `"${value}"`;
+    }
+    return `${this.quoteIdentifier(key)} @> '${value}'`;
+  }
+
   createTableQuery(tableName, attributes, options) {
     if (options) {
       rejectInvalidOptions(

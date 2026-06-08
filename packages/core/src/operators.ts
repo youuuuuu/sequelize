@@ -110,6 +110,8 @@ export interface OpTypes {
    * ```sql
    * @> [1, 2)
    * ```
+   *
+   * Also used for JSONB contains operator.
    */
   readonly contains: unique symbol;
   /**

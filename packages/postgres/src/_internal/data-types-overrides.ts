@@ -301,6 +301,15 @@ export class HSTORE extends BaseTypes.HSTORE {
   }
 }
 
+export class JSONB extends BaseTypes.JSONB {
+  toDatabaseValue(value: unknown): unknown {
+    if (value === null) {
+      return value;
+    }
+    return globalThis.JSON.stringify(value);
+  }
+}
+
 const defaultRangeParser = buildRangeParser(identity);
 
 export class RANGE<

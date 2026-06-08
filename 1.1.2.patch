@@ -1,0 +1,51 @@
+diff --git a/packages/core/src/operators.ts b/packages/core/src/operators.ts
+index e99009611..7213b97ed 100644
+--- a/packages/core/src/operators.ts
++++ b/packages/core/src/operators.ts
+@@ -110,6 +110,8 @@ export interface OpTypes {
+    * ```sql
+    * @> [1, 2)
+    * ```
++   *
++   * Also used for JSONB contains operator.
+    */
+   readonly contains: unique symbol;
+   /**
+diff --git a/packages/postgres/src/_internal/data-types-overrides.ts b/packages/postgres/src/_internal/data-types-overrides.ts
+index da82c5b5c..6ccae2bcc 100644
+--- a/packages/postgres/src/_internal/data-types-overrides.ts
++++ b/packages/postgres/src/_internal/data-types-overrides.ts
+@@ -301,6 +301,15 @@ export class HSTORE extends BaseTypes.HSTORE {
+   }
+ }
+ 
++export class JSONB extends BaseTypes.JSONB {
++  toDatabaseValue(value: unknown): unknown {
++    if (value === null) {
++      return value;
++    }
++    return globalThis.JSON.stringify(value);
++  }
++}
++
+ const defaultRangeParser = buildRangeParser(identity);
+ 
+ export class RANGE<
+diff --git a/packages/postgres/src/query-generator.js b/packages/postgres/src/query-generator.js
+index 600e43a3a..703dabc72 100644
+--- a/packages/postgres/src/query-generator.js
++++ b/packages/postgres/src/query-generator.js
+@@ -41,6 +41,13 @@ export class PostgresQueryGenerator extends PostgresQueryGeneratorTypeScript {
+     return `SET search_path to ${searchPath};`;
+   }
+ 
++  _whereJsonContains(key, value) {
++    if (typeof value === 'string') {
++      value = `"${value}"`;
++    }
++    return `${this.quoteIdentifier(key)} @> '${value}'`;
++  }
++
+   createTableQuery(tableName, attributes, options) {
+     if (options) {
+       rejectInvalidOptions(
