@@ -1,7 +1,13 @@
-import { EMPTY_ARRAY, EMPTY_OBJECT, shallowClonePojo } from '@sequelize/utils';
+import { EMPTY_ARRAY, EMPTY_OBJECT, find, pojo, shallowClonePojo } from '@sequelize/utils';
+import cloneDeepLodash from 'lodash/cloneDeep';
+import defaultsLodash from 'lodash/defaults';
+import intersection from 'lodash/intersection';
+import omit from 'lodash/omit';
+import without from 'lodash/without';
 import assert from 'node:assert';
 import { getBelongsToAssociationsWithTarget } from './_model-internals/get-belongs-to-associations-with-target.js';
-import type { BelongsToAssociation } from './associations/index.js';
+import type { BelongsToAssociation, BelongsToManyAssociation } from './associations/index.js';
+import { AbstractDataType } from './abstract-dialect/data-types';
 import { mayRunHook } from './hooks.js';
 import type { ModelDefinition } from './model-definition.js';
 import {
@@ -14,11 +20,14 @@ import {
 } from './model-internals.js';
 import type {
   BulkDestroyOptions,
+  BulkUpsertOptions,
   CommonDestroyOptions,
   DestroyManyOptions,
 } from './model-repository.types.js';
 import { ManualOnDelete } from './model-repository.types.js';
-import type { Model, Transactionable } from './model.js';
+import type { Attributes, CreationAttributes, Model, Transactionable } from './model.js';
+import { mapValueFieldNames } from './utils/format';
+import { getObjectFromMap } from './utils/object';
 import { Op } from './operators.js';
 
 /**
@@ -310,6 +319,300 @@ This would lead to an active record being associated with a deleted record.`);
         }
       }),
     );
+  }
+
+  async _UNSTABLE_bulkUpsert(
+    records: ReadonlyArray<CreationAttributes<M>>,
+    options: BulkUpsertOptions<Attributes<M>> = EMPTY_OBJECT,
+  ): Promise<M[]> {
+    if (records.length === 0) {
+      return [];
+    }
+
+    const dialect = this.#sequelize.dialect.name;
+    const now = new Date();
+    options = cloneDeepLodash(options) ?? {};
+
+    setTransactionFromCls(options, this.#sequelize);
+
+    const modelDefinition = this.#modelDefinition;
+    const model = modelDefinition.model;
+
+    // TODO: handle include options once they are properly supported
+    // if (!options.includeValidated) {
+    //   model._conformIncludes(options, model);
+    //   if (options.include) {
+    //     model._expandIncludeAll(options);
+    //     _validateIncludedElements(options);
+    //   }
+    // }
+
+    const instances = records.map(values =>
+      model.build(values, { isNewRecord: true }),
+    );
+
+    const recursiveBulkUpsert = async (instances: M[], options: any) => {
+      options = {
+        validate: false,
+        individualHooks: false,
+        ignoreDuplicates: false,
+        ...options,
+      };
+
+      if (options.returning === undefined) {
+        if (options.association) {
+          options.returning = false;
+        } else {
+          options.returning = true;
+        }
+      }
+
+      if (
+        options.ignoreDuplicates &&
+        this.#sequelize.dialect.supports.inserts.ignoreDuplicates === false
+      ) {
+        throw new Error(`${dialect} does not support the ignoreDuplicates option.`);
+      }
+
+      if (
+        options.updateOnDuplicate &&
+        !this.#sequelize.dialect.supports.inserts.updateOnDuplicate
+      ) {
+        throw new Error(`${dialect} does not support the updateOnDuplicate option.`);
+      }
+
+      options.fields = options.fields || Array.from(modelDefinition.attributes.keys());
+      const createdAtAttr = modelDefinition.timestampAttributeNames.createdAt;
+      const updatedAtAttr = modelDefinition.timestampAttributeNames.updatedAt;
+
+      if (options.updateOnDuplicate !== undefined) {
+        if (Array.isArray(options.updateOnDuplicate) && options.updateOnDuplicate.length > 0) {
+          options.updateOnDuplicate = intersection(
+            without(Object.keys(model.tableAttributes), createdAtAttr),
+            options.updateOnDuplicate,
+          );
+        } else {
+          throw new Error('updateOnDuplicate option only supports non-empty array.');
+        }
+      }
+
+      // Run before hook
+      if (mayRunHook('_UNSTABLE_beforeBulkUpsert', options.noHooks)) {
+        await modelDefinition.hooks.runAsync('_UNSTABLE_beforeBulkUpsert', instances, options);
+      }
+
+      // Validate
+      if (options.validate) {
+        const errors: any[] = [];
+        const validateOptions = { ...options };
+        validateOptions.hooks = options.individualHooks;
+
+        await Promise.all(
+          instances.map(async instance => {
+            try {
+              await instance.validate(validateOptions);
+            } catch (error: any) {
+              errors.push({ error, instance });
+            }
+          }),
+        );
+
+        delete options.skip;
+        if (errors.length > 0) {
+          throw new Error('Validation failed');
+        }
+      }
+
+      if (options.individualHooks) {
+        await Promise.all(
+          instances.map(async instance => {
+            const individualOptions = {
+              ...options,
+              validate: false,
+              noHooks: true,
+            };
+            delete individualOptions.fields;
+            delete individualOptions.individualHooks;
+            delete individualOptions.ignoreDuplicates;
+
+            await instance.save(individualOptions);
+          }),
+        );
+      } else {
+        // TODO: handle include options once they are properly supported
+        // if (options.include && options.include.length > 0) {
+        //   await Promise.all(
+        //     options.include
+        //       .filter(include => include.association instanceof BelongsToAssociation)
+        //       .map(async include => {
+        //         // ... include handling logic
+        //       }),
+        //   );
+        // }
+
+        // Create all in one query
+        // Recreate records from instances to represent any changes made in hooks or validation
+        const mappedRecords = instances.map(instance => {
+          const values = instance.dataValues;
+
+          // set createdAt/updatedAt attributes
+          if (createdAtAttr && !values[createdAtAttr]) {
+            values[createdAtAttr] = now;
+            if (!options.fields.includes(createdAtAttr)) {
+              options.fields.push(createdAtAttr);
+            }
+          }
+
+          if (updatedAtAttr && !values[updatedAtAttr]) {
+            values[updatedAtAttr] = now;
+            if (!options.fields.includes(updatedAtAttr)) {
+              options.fields.push(updatedAtAttr);
+            }
+          }
+
+          const out = mapValueFieldNames(values, options.fields, model);
+          for (const key of modelDefinition.virtualAttributeNames) {
+            delete out[key];
+          }
+
+          return out;
+        });
+
+        // Map attributes to fields for serial identification
+        const fieldMappedAttributes = pojo();
+        for (const attrName in model.tableAttributes) {
+          const attribute = modelDefinition.attributes.get(attrName);
+          if (attribute) {
+            fieldMappedAttributes[attribute.columnName] = attribute;
+          }
+        }
+
+        // Map updateOnDuplicate attributes to fields
+        if (options.updateOnDuplicate) {
+          options.updateOnDuplicate = options.updateOnDuplicate.map((attrName: string) => {
+            return modelDefinition.getColumnName(attrName);
+          });
+
+          if (options.conflictAttributes) {
+            options.upsertKeys = options.conflictAttributes.map((attrName: string) =>
+              modelDefinition.getColumnName(attrName),
+            );
+          } else {
+            const upsertKeys: string[] = [];
+
+            for (const i of model.getIndexes()) {
+              if (i.unique && !i.where) {
+                // Don't infer partial indexes
+                upsertKeys.push(...i.fields);
+              }
+            }
+
+            options.upsertKeys =
+              upsertKeys.length > 0
+                ? upsertKeys
+                : Object.values(model.primaryKeys).map(x => x.field);
+          }
+        }
+
+        // Map returning attributes to fields
+        if (options.returning && Array.isArray(options.returning)) {
+          options.returning = options.returning.map((attr: string) =>
+            modelDefinition.getColumnNameLoose(attr),
+          );
+        }
+
+        const results = await this.#queryInterface.bulkInsert(
+          model.table,
+          mappedRecords,
+          options,
+          fieldMappedAttributes,
+        );
+        if (Array.isArray(results)) {
+          for (const [i, result] of results.entries()) {
+            const instance = instances[i];
+
+            for (const key in result) {
+              if (!Object.hasOwn(result, key)) {
+                continue;
+              }
+
+              if (
+                !instance ||
+                (key === model.primaryKeyAttribute &&
+                  instance.get(model.primaryKeyAttribute) &&
+                  ['mysql', 'mariadb'].includes(dialect))
+              ) {
+                // The query.js for these DBs is blind, it autoincrements the
+                // primarykey value, even if it was set manually. Also, it can
+                // return more results than instances, bug?.
+                continue;
+              }
+
+              const value = result[key];
+              const attr = find(
+                modelDefinition.attributes.values(),
+                attribute => attribute.attributeName === key || attribute.columnName === key,
+              );
+              const attributeName = attr?.attributeName || key;
+              instance.dataValues[attributeName] =
+                value != null && attr?.type instanceof AbstractDataType
+                  ? attr.type.parseDatabaseValue(value)
+                  : value;
+              instance._previousDataValues[attributeName] = instance.dataValues[attributeName];
+            }
+          }
+        }
+      }
+
+      // TODO: handle include options once they are properly supported
+      // if (options.include && options.include.length > 0) {
+      //   await Promise.all(
+      //     options.include
+      //       .filter(
+      //         include =>
+      //           !(
+      //             include.association instanceof BelongsToAssociation ||
+      //             (include.parent && include.parent.association instanceof BelongsToManyAssociation)
+      //           ),
+      //       )
+      //       .map(async include => {
+      //         // ... include handling logic
+      //       }),
+      //   );
+      // }
+
+      // map fields back to attributes
+      for (const instance of instances) {
+        const attributeDefs = modelDefinition.attributes;
+
+        for (const attribute of attributeDefs.values()) {
+          if (
+            instance.dataValues[attribute.columnName] !== undefined &&
+            attribute.columnName !== attribute.attributeName
+          ) {
+            instance.dataValues[attribute.attributeName] =
+              instance.dataValues[attribute.columnName];
+            // TODO: if a column shares the same name as an attribute, this will cause a bug!
+            delete instance.dataValues[attribute.columnName];
+          }
+
+          instance._previousDataValues[attribute.attributeName] =
+            instance.dataValues[attribute.attributeName];
+          instance.changed(attribute.attributeName, false);
+        }
+
+        instance.isNewRecord = false;
+      }
+
+      // Run after hook
+      if (mayRunHook('_UNSTABLE_afterBulkUpsert', options.noHooks)) {
+        await modelDefinition.hooks.runAsync('_UNSTABLE_afterBulkUpsert', instances, options);
+      }
+
+      return instances;
+    };
+
+    return await recursiveBulkUpsert(instances, options);
   }
 
   // async save(instances: M[] | M): Promise<void> {}
