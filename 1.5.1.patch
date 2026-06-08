@@ -1,0 +1,377 @@
+diff --git a/packages/core/src/abstract-dialect/query-generator.js b/packages/core/src/abstract-dialect/query-generator.js
+index 20a525421..dd23ba196 100644
+--- a/packages/core/src/abstract-dialect/query-generator.js
++++ b/packages/core/src/abstract-dialect/query-generator.js
+@@ -22,7 +22,7 @@ import * as DataTypes from '../data-types';
+ import { ParameterStyle } from '../enums.js';
+ import * as sequelizeError from '../errors';
+ import { BaseSqlExpression } from '../expression-builders/base-sql-expression.js';
+-import { Col } from '../expression-builders/col.js';
++import { Col, parseColJsonPath } from '../expression-builders/col.js';
+ import { Literal } from '../expression-builders/literal.js';
+ import { _validateIncludedElements, conformIndex } from '../model-internals';
+ import { Op } from '../operators';
+@@ -67,6 +67,51 @@ function isModelAttribute(value) {
+   return value?._modelAttribute === true;
+ }
+ 
++function getJsonColumnName(modelDefinition, columnName) {
++  const attribute = modelDefinition.attributes.get(columnName);
++  if (attribute?.type instanceof DataTypes.JSON) {
++    return attribute.columnName;
++  }
++
++  for (const modelAttribute of modelDefinition.attributes.values()) {
++    if (
++      modelAttribute.columnName === columnName &&
++      modelAttribute.type instanceof DataTypes.JSON
++    ) {
++      return modelAttribute.columnName;
++    }
++  }
++
++  return null;
++}
++
++function getJsonPathColumnReference(identifier, model, options) {
++  if (!isModelStatic(model)) {
++    return null;
++  }
++
++  const modelDefinition = model.modelDefinition;
++  const parsedPath = parseColJsonPath(
++    identifier,
++    columnName => getJsonColumnName(modelDefinition, columnName) != null,
++    [options?.mainAlias, modelDefinition.modelName, model.name],
++  );
++
++  if (!parsedPath) {
++    return null;
++  }
++
++  const columnName = getJsonColumnName(modelDefinition, parsedPath.columnIdentifier);
++  if (!columnName) {
++    return null;
++  }
++
++  return {
++    baseIdentifier: parsedPath.prefix ? `${parsedPath.prefix}.${columnName}` : columnName,
++    pathSegments: parsedPath.pathSegments,
++  };
++}
++
+ /**
+  * Abstract Query Generator
+  *
+@@ -836,8 +881,15 @@ export class AbstractQueryGenerator extends AbstractQueryGeneratorTypeScript {
+     // init
+     const validOrderOptions = VALID_ORDER_OPTIONS;
+ 
+-    // just quote as identifiers if string
+     if (typeof collection === 'string') {
++      const jsonPathColumn = getJsonPathColumnReference(collection, parent, options);
++      if (jsonPathColumn) {
++        return this.jsonPathExtractionQuery(
++          this.quoteIdentifiers(jsonPathColumn.baseIdentifier),
++          jsonPathColumn.pathSegments,
++        );
++      }
++
+       return this.quoteIdentifiers(collection);
+     }
+ 
+@@ -913,24 +965,15 @@ export class AbstractQueryGenerator extends AbstractQueryGeneratorTypeScript {
+             } else if (previousModelDefinition.attributes.has(item)) {
+               // convert the item attribute from its alias
+               item = previousModelDefinition.attributes.get(item).columnName;
+-            } else if (item.includes('.')) {
+-              const itemSplit = item.split('.');
+-
+-              const jsonAttribute = previousModelDefinition.attributes.get(itemSplit[0]);
+-              if (jsonAttribute.type instanceof DataTypes.JSON) {
+-                // just quote identifiers for now
+-                const identifier = this.quoteIdentifiers(
+-                  `${previousModel.name}.${jsonAttribute.columnName}`,
++            } else {
++              const jsonPathColumn = getJsonPathColumnReference(item, previousModel, options);
++              if (jsonPathColumn) {
++                item = new Literal(
++                  this.jsonPathExtractionQuery(
++                    this.quoteIdentifiers(jsonPathColumn.baseIdentifier),
++                    jsonPathColumn.pathSegments,
++                  ),
+                 );
+-
+-                // get path
+-                const path = itemSplit.slice(1);
+-
+-                // extract path
+-                item = this.jsonPathExtractionQuery(identifier, path);
+-
+-                // literal because we don't want to append the model name when string
+-                item = new Literal(item);
+               }
+             }
+           }
+diff --git a/packages/core/src/abstract-dialect/where-sql-builder.ts b/packages/core/src/abstract-dialect/where-sql-builder.ts
+index d55f992e4..c96205149 100644
+--- a/packages/core/src/abstract-dialect/where-sql-builder.ts
++++ b/packages/core/src/abstract-dialect/where-sql-builder.ts
+@@ -6,7 +6,7 @@ import { AssociationPath } from '../expression-builders/association-path.js';
+ import { Attribute } from '../expression-builders/attribute.js';
+ import { BaseSqlExpression } from '../expression-builders/base-sql-expression.js';
+ import { Cast } from '../expression-builders/cast.js';
+-import { Col } from '../expression-builders/col.js';
++import { Col, parseColJsonPath } from '../expression-builders/col.js';
+ import { JsonPath } from '../expression-builders/json-path.js';
+ import { SQL_NULL } from '../expression-builders/json-sql-null.js';
+ import { Literal } from '../expression-builders/literal.js';
+@@ -269,13 +269,13 @@ export class WhereSqlBuilder {
+    */
+   formatPojoWhere(pojoWhere: PojoWhere, options: FormatWhereOptions = EMPTY_OBJECT): string {
+     const modelDefinition = options?.model ? extractModelDefinition(options.model) : null;
++    const leftOperand = this.#normalizeJsonPathOperand(pojoWhere.leftOperand, modelDefinition, options);
+ 
+-    // we need to parse the left operand early to determine the data type of the right operand
+-    let leftDataType = this.#getOperandType(pojoWhere.leftOperand, modelDefinition);
++    let leftDataType = this.#getOperandType(leftOperand, modelDefinition);
+     const operandIsJsonColumn = leftDataType == null || leftDataType instanceof DataTypes.JSON;
+ 
+     return this.#handleRecursiveNotOrAndNestedPathRecursive(
+-      pojoWhere.leftOperand,
++      leftOperand,
+       pojoWhere.whereValue,
+       operandIsJsonColumn,
+       (left: Expression, operator: symbol | undefined, right: Expression) => {
+@@ -283,15 +283,14 @@ export class WhereSqlBuilder {
+         // if the user used a JSON path in the where clause.
+         if (leftDataType == null && left instanceof JsonPath) {
+           leftDataType = this.#jsonType;
+-        } else if (left !== pojoWhere.leftOperand) {
+-          // if "left" was wrapped in a JSON path, we need to get its data type again as it might have been cast
++        } else if (left !== leftOperand) {
+           leftDataType = this.#getOperandType(left, modelDefinition);
+         }
+ 
+         if (operator === Op.col) {
+           noOpCol();
+ 
+-          right = new Col(right as string);
++          right = this.#normalizeJsonPathOperand(new Col(right as string), modelDefinition, options);
+           operator = Op.eq;
+         }
+ 
+@@ -929,10 +928,8 @@ export class WhereSqlBuilder {
+ 
+     for (const castOrModifier of parsedPath.castsAndModifiers) {
+       if (isString(castOrModifier)) {
+-        // casts are always strings
+         operand = new Cast(operand, castOrModifier);
+       } else {
+-        // modifiers are always classes
+         operand = new castOrModifier(operand);
+       }
+     }
+@@ -940,6 +937,65 @@ export class WhereSqlBuilder {
+     return operand;
+   }
+ 
++  #normalizeJsonPathOperand(
++    operand: Expression,
++    modelDefinition: ModelDefinition | Nullish,
++    options: FormatWhereOptions,
++  ): Expression {
++    if (!(operand instanceof Col) || operand.identifiers.length !== 1) {
++      return operand;
++    }
++
++    const [identifier] = operand.identifiers;
++    const parsedPath =
++      typeof identifier === 'string'
++        ? parseColJsonPath(identifier, columnName => this.#getJsonColumnName(modelDefinition, columnName) != null, [
++            options.mainAlias,
++            modelDefinition?.modelName,
++          ])
++        : null;
++
++    if (!parsedPath) {
++      return operand;
++    }
++
++    const columnName = this.#getJsonColumnName(modelDefinition, parsedPath.columnIdentifier);
++    if (!columnName) {
++      return operand;
++    }
++
++    const baseIdentifier = parsedPath.prefix
++      ? `${parsedPath.prefix}.${columnName}`
++      : columnName;
++
++    return new JsonPath(new Col(baseIdentifier), parsedPath.pathSegments);
++  }
++
++  #getJsonColumnName(
++    modelDefinition: ModelDefinition | Nullish,
++    columnName: string,
++  ): string | null {
++    if (!modelDefinition) {
++      return null;
++    }
++
++    const attribute = modelDefinition.attributes.get(columnName);
++    if (attribute?.type instanceof DataTypes.JSON) {
++      return attribute.columnName;
++    }
++
++    for (const modelAttribute of modelDefinition.attributes.values()) {
++      if (
++        modelAttribute.columnName === columnName &&
++        modelAttribute.type instanceof DataTypes.JSON
++      ) {
++        return modelAttribute.columnName;
++      }
++    }
++
++    return null;
++  }
++
+   #getOperandType(
+     operand: Expression,
+     modelDefinition: ModelDefinition | Nullish,
+@@ -950,7 +1006,6 @@ export class WhereSqlBuilder {
+     }
+ 
+     if (operand instanceof JsonPath) {
+-      // JsonPath can wrap Attributes
+       return this.#jsonType;
+     }
+ 
+@@ -958,6 +1013,19 @@ export class WhereSqlBuilder {
+       return undefined;
+     }
+ 
++    if (operand instanceof Col && operand.identifiers.length === 1) {
++      const [identifier] = operand.identifiers;
++      if (typeof identifier === 'string') {
++        const columnName = identifier.includes('.') ? identifier.slice(identifier.lastIndexOf('.') + 1) : identifier;
++
++        for (const attribute of modelDefinition.attributes.values()) {
++          if (attribute.attributeName === columnName || attribute.columnName === columnName) {
++            return attribute.type;
++          }
++        }
++      }
++    }
++
+     if (operand instanceof AssociationPath) {
+       const association = modelDefinition.getAssociation(operand.associationPath);
+ 
+diff --git a/packages/core/src/expression-builders/col.ts b/packages/core/src/expression-builders/col.ts
+index 42400f36f..4fb3689cf 100644
+--- a/packages/core/src/expression-builders/col.ts
++++ b/packages/core/src/expression-builders/col.ts
+@@ -1,3 +1,4 @@
++import { parseNestedJsonKeySyntax } from '../utils/attribute-syntax.js';
+ import { BaseSqlExpression, SQL_IDENTIFIER } from './base-sql-expression.js';
+ 
+ /**
+@@ -16,6 +17,99 @@ export class Col extends BaseSqlExpression {
+   }
+ }
+ 
++export interface ParsedColJsonPath {
++  readonly baseIdentifier: string;
++  readonly columnIdentifier: string;
++  readonly pathSegments: ReadonlyArray<string | number>;
++  readonly prefix: string | undefined;
++}
++
++function splitIdentifierHead(identifier: string): { head: string; tail: string | null } {
++  const dotIndex = identifier.indexOf('.');
++  const bracketIndex = identifier.indexOf('[');
++
++  let separatorIndex = -1;
++  if (dotIndex === -1) {
++    separatorIndex = bracketIndex;
++  } else if (bracketIndex === -1) {
++    separatorIndex = dotIndex;
++  } else {
++    separatorIndex = Math.min(dotIndex, bracketIndex);
++  }
++
++  if (separatorIndex === -1) {
++    return {
++      head: identifier,
++      tail: null,
++    };
++  }
++
++  return {
++    head: identifier.slice(0, separatorIndex),
++    tail: identifier.slice(separatorIndex),
++  };
++}
++
++function parsePathSegments(path: string): ReadonlyArray<string | number> | null {
++  if (path.length === 0) {
++    return null;
++  }
++
++  const nestedPath = path.startsWith('.') ? path.slice(1) : path;
++  if (nestedPath.length === 0) {
++    return null;
++  }
++
++  const parsedPath = parseNestedJsonKeySyntax(nestedPath);
++  if (parsedPath.castsAndModifiers.length > 0) {
++    return null;
++  }
++
++  return parsedPath.pathSegments;
++}
++
++function parseCandidate(
++  identifier: string,
++  isJsonColumn: (identifier: string) => boolean,
++  prefix: string | undefined,
++): ParsedColJsonPath | null {
++  const { head, tail } = splitIdentifierHead(identifier);
++  if (tail == null || !isJsonColumn(head)) {
++    return null;
++  }
++
++  const pathSegments = parsePathSegments(tail);
++  if (pathSegments == null) {
++    return null;
++  }
++
++  return {
++    baseIdentifier: prefix ? `${prefix}.${head}` : head,
++    columnIdentifier: head,
++    pathSegments,
++    prefix,
++  };
++}
++
++export function parseColJsonPath(
++  identifier: string,
++  isJsonColumn: (identifier: string) => boolean,
++  prefixes: ReadonlyArray<string | null | undefined> = [],
++): ParsedColJsonPath | null {
++  for (const prefix of prefixes) {
++    if (!prefix || !identifier.startsWith(`${prefix}.`)) {
++      continue;
++    }
++
++    const parsed = parseCandidate(identifier.slice(prefix.length + 1), isJsonColumn, prefix);
++    if (parsed) {
++      return parsed;
++    }
++  }
++
++  return parseCandidate(identifier, isJsonColumn, undefined);
++}
++
+ /**
+  * Creates an object which represents a column in the DB, this allows referencing another column in your query.
+  * This is often useful in conjunction with {@link sql.fn}, {@link sql.where} and {@link sql} which interpret strings as values and not column names.

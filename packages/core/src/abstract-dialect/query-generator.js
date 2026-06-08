@@ -22,7 +22,7 @@ import * as DataTypes from '../data-types';
 import { ParameterStyle } from '../enums.js';
 import * as sequelizeError from '../errors';
 import { BaseSqlExpression } from '../expression-builders/base-sql-expression.js';
-import { Col } from '../expression-builders/col.js';
+import { Col, parseColJsonPath } from '../expression-builders/col.js';
 import { Literal } from '../expression-builders/literal.js';
 import { _validateIncludedElements, conformIndex } from '../model-internals';
 import { Op } from '../operators';
@@ -65,6 +65,51 @@ function isOrderDirection(value) {
 
 function isModelAttribute(value) {
   return value?._modelAttribute === true;
+}
+
+function getJsonColumnName(modelDefinition, columnName) {
+  const attribute = modelDefinition.attributes.get(columnName);
+  if (attribute?.type instanceof DataTypes.JSON) {
+    return attribute.columnName;
+  }
+
+  for (const modelAttribute of modelDefinition.attributes.values()) {
+    if (
+      modelAttribute.columnName === columnName &&
+      modelAttribute.type instanceof DataTypes.JSON
+    ) {
+      return modelAttribute.columnName;
+    }
+  }
+
+  return null;
+}
+
+function getJsonPathColumnReference(identifier, model, options) {
+  if (!isModelStatic(model)) {
+    return null;
+  }
+
+  const modelDefinition = model.modelDefinition;
+  const parsedPath = parseColJsonPath(
+    identifier,
+    columnName => getJsonColumnName(modelDefinition, columnName) != null,
+    [options?.mainAlias, modelDefinition.modelName, model.name],
+  );
+
+  if (!parsedPath) {
+    return null;
+  }
+
+  const columnName = getJsonColumnName(modelDefinition, parsedPath.columnIdentifier);
+  if (!columnName) {
+    return null;
+  }
+
+  return {
+    baseIdentifier: parsedPath.prefix ? `${parsedPath.prefix}.${columnName}` : columnName,
+    pathSegments: parsedPath.pathSegments,
+  };
 }
 
 /**
@@ -836,8 +881,15 @@ export class AbstractQueryGenerator extends AbstractQueryGeneratorTypeScript {
     // init
     const validOrderOptions = VALID_ORDER_OPTIONS;
 
-    // just quote as identifiers if string
     if (typeof collection === 'string') {
+      const jsonPathColumn = getJsonPathColumnReference(collection, parent, options);
+      if (jsonPathColumn) {
+        return this.jsonPathExtractionQuery(
+          this.quoteIdentifiers(jsonPathColumn.baseIdentifier),
+          jsonPathColumn.pathSegments,
+        );
+      }
+
       return this.quoteIdentifiers(collection);
     }
 
@@ -913,24 +965,15 @@ export class AbstractQueryGenerator extends AbstractQueryGeneratorTypeScript {
             } else if (previousModelDefinition.attributes.has(item)) {
               // convert the item attribute from its alias
               item = previousModelDefinition.attributes.get(item).columnName;
-            } else if (item.includes('.')) {
-              const itemSplit = item.split('.');
-
-              const jsonAttribute = previousModelDefinition.attributes.get(itemSplit[0]);
-              if (jsonAttribute.type instanceof DataTypes.JSON) {
-                // just quote identifiers for now
-                const identifier = this.quoteIdentifiers(
-                  `${previousModel.name}.${jsonAttribute.columnName}`,
+            } else {
+              const jsonPathColumn = getJsonPathColumnReference(item, previousModel, options);
+              if (jsonPathColumn) {
+                item = new Literal(
+                  this.jsonPathExtractionQuery(
+                    this.quoteIdentifiers(jsonPathColumn.baseIdentifier),
+                    jsonPathColumn.pathSegments,
+                  ),
                 );
-
-                // get path
-                const path = itemSplit.slice(1);
-
-                // extract path
-                item = this.jsonPathExtractionQuery(identifier, path);
-
-                // literal because we don't want to append the model name when string
-                item = new Literal(item);
               }
             }
           }

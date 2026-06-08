@@ -6,7 +6,7 @@ import { AssociationPath } from '../expression-builders/association-path.js';
 import { Attribute } from '../expression-builders/attribute.js';
 import { BaseSqlExpression } from '../expression-builders/base-sql-expression.js';
 import { Cast } from '../expression-builders/cast.js';
-import { Col } from '../expression-builders/col.js';
+import { Col, parseColJsonPath } from '../expression-builders/col.js';
 import { JsonPath } from '../expression-builders/json-path.js';
 import { SQL_NULL } from '../expression-builders/json-sql-null.js';
 import { Literal } from '../expression-builders/literal.js';
@@ -269,13 +269,13 @@ export class WhereSqlBuilder {
    */
   formatPojoWhere(pojoWhere: PojoWhere, options: FormatWhereOptions = EMPTY_OBJECT): string {
     const modelDefinition = options?.model ? extractModelDefinition(options.model) : null;
+    const leftOperand = this.#normalizeJsonPathOperand(pojoWhere.leftOperand, modelDefinition, options);
 
-    // we need to parse the left operand early to determine the data type of the right operand
-    let leftDataType = this.#getOperandType(pojoWhere.leftOperand, modelDefinition);
+    let leftDataType = this.#getOperandType(leftOperand, modelDefinition);
     const operandIsJsonColumn = leftDataType == null || leftDataType instanceof DataTypes.JSON;
 
     return this.#handleRecursiveNotOrAndNestedPathRecursive(
-      pojoWhere.leftOperand,
+      leftOperand,
       pojoWhere.whereValue,
       operandIsJsonColumn,
       (left: Expression, operator: symbol | undefined, right: Expression) => {
@@ -283,15 +283,14 @@ export class WhereSqlBuilder {
         // if the user used a JSON path in the where clause.
         if (leftDataType == null && left instanceof JsonPath) {
           leftDataType = this.#jsonType;
-        } else if (left !== pojoWhere.leftOperand) {
-          // if "left" was wrapped in a JSON path, we need to get its data type again as it might have been cast
+        } else if (left !== leftOperand) {
           leftDataType = this.#getOperandType(left, modelDefinition);
         }
 
         if (operator === Op.col) {
           noOpCol();
 
-          right = new Col(right as string);
+          right = this.#normalizeJsonPathOperand(new Col(right as string), modelDefinition, options);
           operator = Op.eq;
         }
 
@@ -929,15 +928,72 @@ export class WhereSqlBuilder {
 
     for (const castOrModifier of parsedPath.castsAndModifiers) {
       if (isString(castOrModifier)) {
-        // casts are always strings
         operand = new Cast(operand, castOrModifier);
       } else {
-        // modifiers are always classes
         operand = new castOrModifier(operand);
       }
     }
 
     return operand;
+  }
+
+  #normalizeJsonPathOperand(
+    operand: Expression,
+    modelDefinition: ModelDefinition | Nullish,
+    options: FormatWhereOptions,
+  ): Expression {
+    if (!(operand instanceof Col) || operand.identifiers.length !== 1) {
+      return operand;
+    }
+
+    const [identifier] = operand.identifiers;
+    const parsedPath =
+      typeof identifier === 'string'
+        ? parseColJsonPath(identifier, columnName => this.#getJsonColumnName(modelDefinition, columnName) != null, [
+            options.mainAlias,
+            modelDefinition?.modelName,
+          ])
+        : null;
+
+    if (!parsedPath) {
+      return operand;
+    }
+
+    const columnName = this.#getJsonColumnName(modelDefinition, parsedPath.columnIdentifier);
+    if (!columnName) {
+      return operand;
+    }
+
+    const baseIdentifier = parsedPath.prefix
+      ? `${parsedPath.prefix}.${columnName}`
+      : columnName;
+
+    return new JsonPath(new Col(baseIdentifier), parsedPath.pathSegments);
+  }
+
+  #getJsonColumnName(
+    modelDefinition: ModelDefinition | Nullish,
+    columnName: string,
+  ): string | null {
+    if (!modelDefinition) {
+      return null;
+    }
+
+    const attribute = modelDefinition.attributes.get(columnName);
+    if (attribute?.type instanceof DataTypes.JSON) {
+      return attribute.columnName;
+    }
+
+    for (const modelAttribute of modelDefinition.attributes.values()) {
+      if (
+        modelAttribute.columnName === columnName &&
+        modelAttribute.type instanceof DataTypes.JSON
+      ) {
+        return modelAttribute.columnName;
+      }
+    }
+
+    return null;
   }
 
   #getOperandType(
@@ -950,12 +1006,24 @@ export class WhereSqlBuilder {
     }
 
     if (operand instanceof JsonPath) {
-      // JsonPath can wrap Attributes
       return this.#jsonType;
     }
 
     if (!modelDefinition) {
       return undefined;
+    }
+
+    if (operand instanceof Col && operand.identifiers.length === 1) {
+      const [identifier] = operand.identifiers;
+      if (typeof identifier === 'string') {
+        const columnName = identifier.includes('.') ? identifier.slice(identifier.lastIndexOf('.') + 1) : identifier;
+
+        for (const attribute of modelDefinition.attributes.values()) {
+          if (attribute.attributeName === columnName || attribute.columnName === columnName) {
+            return attribute.type;
+          }
+        }
+      }
     }
 
     if (operand instanceof AssociationPath) {
