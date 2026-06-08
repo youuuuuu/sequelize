@@ -986,7 +986,11 @@ ${associationOwner._getAssociationDebugList()}`);
 
     for (const index of missingIndexes) {
       // TODO: 'options' is ignored by addIndex, making Add Index queries impossible to log.
-      await this.queryInterface.addIndex(tableName, index, options);
+      await this.queryInterface.addIndex(
+        tableName,
+        index,
+        this.sequelize.dialect.name === 'sqlite3' ? { ...options, model: this } : options,
+      );
     }
 
     if (options.hooks) {
@@ -1370,6 +1374,7 @@ ${associationOwner._getAssociationDebugList()}`);
     setTransactionFromCls(options, this.sequelize);
 
     defaultsLodash(options, { hooks: true, model: this });
+    options.model = this;
 
     // set rejectOnEmpty option, defaults to model options
     options.rejectOnEmpty = Object.hasOwn(options, 'rejectOnEmpty')
@@ -1579,6 +1584,8 @@ ${associationOwner._getAssociationDebugList()}`);
     if (options.limit === undefined) {
       options.limit = 1;
     }
+
+    options.model = this;
 
     // Bypass a possible overloaded findAll.
     return await Model.findAll.call(

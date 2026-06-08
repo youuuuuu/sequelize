@@ -24,7 +24,9 @@ import {
   noSchemaParameter,
 } from '@sequelize/core/_non-semver-use-at-your-own-risk_/utils/deprecations.js';
 import { withSqliteForeignKeysOff } from '@sequelize/core/_non-semver-use-at-your-own-risk_/utils/sql.js';
+import intersection from 'lodash/intersection';
 import isEmpty from 'lodash/isEmpty';
+import mapValues from 'lodash/mapValues';
 import type { SqliteDialect } from './dialect.js';
 import { SqliteQueryInterfaceInternal } from './query-interface.internal.js';
 import type { SqliteColumnsDescription } from './query-interface.types.js';
@@ -39,6 +41,157 @@ export class SqliteQueryInterface<
 
     super(dialect, internalQueryInterface);
     this.#internalQueryInterface = internalQueryInterface;
+  }
+
+  #getParanoidDeletedAtColumn(model: any): string | null {
+    if (!model?.options?.timestamps || !model.options.paranoid) {
+      return null;
+    }
+
+    const deletedAtAttributeName = model.modelDefinition.timestampAttributeNames.deletedAt;
+    if (!deletedAtAttributeName) {
+      return null;
+    }
+
+    return model.modelDefinition.attributes.get(deletedAtAttributeName)?.columnName ?? deletedAtAttributeName;
+  }
+
+  #normalizeIndexFields(fields: unknown): string[] | null {
+    if (!Array.isArray(fields) || fields.length === 0) {
+      return null;
+    }
+
+    const normalizedFields = fields
+      .map(field => {
+        if (typeof field === 'string') {
+          return field;
+        }
+
+        if (field && typeof field === 'object') {
+          return 'name' in field ? field.name : 'attribute' in field ? field.attribute : null;
+        }
+
+        return null;
+      })
+      .filter((field): field is string => Boolean(field));
+
+    return normalizedFields.length > 0 ? normalizedFields : null;
+  }
+
+  async createTable(
+    tableName: TableOrModel,
+    attributes: Record<string, AttributeOptions | DataType>,
+    options?: any,
+    model?: any,
+  ): Promise<void> {
+    const uniqueKeys = options?.uniqueKeys ?? model?.uniqueKeys;
+    options = {
+      ...options,
+      ...(model ? { model } : {}),
+      ...(uniqueKeys ? { uniqueKeys } : {}),
+    };
+
+    attributes = mapValues(attributes, (attribute: AttributeOptions | DataType) =>
+      this.sequelize.normalizeAttribute(attribute),
+    );
+
+    await this.ensureEnums(tableName, attributes, options, model);
+    await this.ensureSequences(tableName, attributes, options);
+
+    const modelTable = model?.table;
+    const tableDetails = this.queryGenerator.extractTableDetails(tableName);
+
+    if (!tableDetails.schema && (options.schema || modelTable?.schema)) {
+      tableDetails.schema = modelTable?.schema || options.schema;
+      tableName = tableDetails;
+    }
+
+    const attributesSql = this.queryGenerator.attributesToSQL(attributes, {
+      table: tableName,
+      context: 'createTable',
+      withoutForeignKeyConstraints: options.withoutForeignKeyConstraints,
+      schema: options.schema,
+    });
+    const { attributes: tableAttributes, uniqueIndexes } = this.queryGenerator.extractTableUniqueIndexes(
+      attributesSql,
+      options,
+    ) as {
+      attributes: Record<string, string>;
+      uniqueIndexes: Array<{ fields: string[]; name?: string; unique: true; where?: object }>;
+    };
+
+    await this.sequelize.queryRaw(
+      this.queryGenerator.createTableQuery(tableName, tableAttributes, options),
+      options,
+    );
+
+    const { uniqueKeys: _uniqueKeys, model: _model, ...indexQueryOptions } = options;
+
+    for (const uniqueIndex of uniqueIndexes) {
+      await this.addIndex(tableName, uniqueIndex.fields, {
+        ...indexQueryOptions,
+        ...uniqueIndex,
+        ...(model ? { model } : {}),
+      });
+    }
+  }
+
+  async upsert(
+    tableName: TableOrModel,
+    insertValues: object,
+    updateValues: object,
+    where: object,
+    options: any,
+  ) {
+    options = { ...options };
+
+    const model = options.model;
+    const deletedAtColumn = this.#getParanoidDeletedAtColumn(model);
+
+    if (deletedAtColumn) {
+      const primaryKeys = Array.from(
+        model.modelDefinition.primaryKeysAttributeNames,
+        (pkAttrName: string) => model.modelDefinition.attributes.get(pkAttrName).columnName,
+      );
+      const conflictFields = options.conflictFields as string[] | undefined;
+      const updateFields = Object.keys(updateValues);
+      const uniqueIndexes = model
+        .getIndexes()
+        .map((index: any) => ({
+          index,
+          fields: this.#normalizeIndexFields(index.fields),
+        }))
+        .filter(
+          (entry: { index: any; fields: string[] | null }) =>
+            entry.index.unique && entry.fields != null && entry.fields.length > 0,
+        );
+
+      let matchedFields: string[] | null = null;
+      if (conflictFields?.length) {
+        matchedFields = uniqueIndexes.find((entry: { fields: string[] | null }) => {
+          return (
+            entry.fields != null &&
+            entry.fields.length === conflictFields.length &&
+            entry.fields.every((field: string, fieldIndex: number) => field === conflictFields[fieldIndex])
+          );
+        })?.fields ?? conflictFields;
+      } else if (intersection(updateFields, primaryKeys).length === 0) {
+        for (const field of updateFields) {
+          matchedFields =
+            uniqueIndexes.find((entry: { fields: string[] | null }) => entry.fields?.includes(field) ?? false)
+              ?.fields ?? null;
+          if (matchedFields) {
+            break;
+          }
+        }
+      }
+
+      if (matchedFields?.length && !matchedFields.includes(deletedAtColumn)) {
+        options.conflictFields = [...matchedFields, deletedAtColumn];
+      }
+    }
+
+    return await super.upsert(tableName, insertValues, updateValues, where, options);
   }
 
   async dropAllTables(options?: QiDropAllTablesOptions): Promise<void> {

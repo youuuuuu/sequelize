@@ -17,8 +17,98 @@ import isObject from 'lodash/isObject';
 import { SqliteQueryGeneratorTypeScript } from './query-generator-typescript.internal.js';
 
 export class SqliteQueryGenerator extends SqliteQueryGeneratorTypeScript {
+  _getParanoidDeletedAtColumn(options) {
+    const model = options?.model;
+    if (!model?.options?.timestamps || !model.options.paranoid) {
+      return null;
+    }
+
+    const deletedAtAttributeName = model.modelDefinition.timestampAttributeNames.deletedAt;
+    if (!deletedAtAttributeName) {
+      return null;
+    }
+
+    return model.modelDefinition.attributes.get(deletedAtAttributeName)?.columnName ?? deletedAtAttributeName;
+  }
+
+  _normalizeIndexFields(fields) {
+    if (!Array.isArray(fields) || fields.length === 0) {
+      return null;
+    }
+
+    return fields
+      .map(field => {
+        if (typeof field === 'string') {
+          return field;
+        }
+
+        if (field && typeof field === 'object') {
+          return field.name ?? field.attribute ?? null;
+        }
+
+        return null;
+      })
+      .filter(Boolean);
+  }
+
+  extractTableUniqueIndexes(attributes, options) {
+    const transformedAttributes = { ...attributes };
+    const uniqueIndexes = [];
+    const uniqueIndexSignatures = new Set();
+    const deletedAtColumn = this._getParanoidDeletedAtColumn(options);
+
+    const addUniqueIndex = index => {
+      const fields = this._normalizeIndexFields(index.fields);
+      if (!fields?.length) {
+        return;
+      }
+
+      if (deletedAtColumn && transformedAttributes[deletedAtColumn] && !fields.includes(deletedAtColumn)) {
+        fields.push(deletedAtColumn);
+      }
+
+      const signature = fields.join(',');
+      if (uniqueIndexSignatures.has(signature)) {
+        return;
+      }
+
+      uniqueIndexSignatures.add(signature);
+      uniqueIndexes.push({
+        ...index,
+        fields,
+        unique: true,
+      });
+    };
+
+    if (deletedAtColumn && transformedAttributes[deletedAtColumn]) {
+      for (const [attributeName, dataType] of Object.entries(transformedAttributes)) {
+        if (attributeName === deletedAtColumn || !dataType.includes(' UNIQUE')) {
+          continue;
+        }
+
+        transformedAttributes[attributeName] = dataType.replace(' UNIQUE', '');
+        addUniqueIndex({ fields: [attributeName] });
+      }
+    }
+
+    const uniqueKeys = Array.isArray(options?.uniqueKeys)
+      ? options.uniqueKeys
+      : Object.entries(options?.uniqueKeys ?? {}).map(([name, index]) => ({
+          ...index,
+          name,
+        }));
+
+    for (const uniqueIndex of uniqueKeys) {
+      addUniqueIndex(uniqueIndex);
+    }
+
+    return {
+      attributes: transformedAttributes,
+      uniqueIndexes,
+    };
+  }
+
   createTableQuery(tableName, attributes, options) {
-    // TODO: add support for 'uniqueKeys' by improving the createTableQuery implementation so it also generates a CREATE UNIQUE INDEX query
     if (options) {
       rejectInvalidOptions(
         'createTableQuery',
@@ -30,6 +120,8 @@ export class SqliteQueryGenerator extends SqliteQueryGeneratorTypeScript {
     }
 
     options ||= {};
+
+    ({ attributes } = this.extractTableUniqueIndexes(attributes, options));
 
     const primaryKeys = [];
     const needsMultiplePrimaryKeys =
@@ -100,6 +192,20 @@ export class SqliteQueryGenerator extends SqliteQueryGeneratorTypeScript {
     const sql = `CREATE TABLE IF NOT EXISTS ${table} (${attrStr});`;
 
     return this.replaceBooleanDefaults(sql);
+  }
+
+  addIndexQuery(tableName, attributes, rawTablename) {
+    const deletedAtColumn = this._getParanoidDeletedAtColumn(attributes);
+    const fields = this._normalizeIndexFields(attributes?.fields);
+
+    if (deletedAtColumn && attributes?.unique && fields?.length && !fields.includes(deletedAtColumn)) {
+      attributes = {
+        ...attributes,
+        fields: [...fields, deletedAtColumn],
+      };
+    }
+
+    return super.addIndexQuery(tableName, attributes, rawTablename);
   }
 
   addColumnQuery(table, key, dataType, options) {
