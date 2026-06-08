@@ -3573,7 +3573,7 @@ Caused by: "undefined" cannot be escaped`),
             },
           },
           {
-            default: `[jsonbAttr] @> '{"company":"Magnafone"}'`,
+            default: `[jsonbAttr] @> '{"company":"Magnafone"}'::JSONB`,
           },
         );
 
@@ -3582,7 +3582,7 @@ Caused by: "undefined" cannot be escaped`),
             jsonbTypeLiteralAttr: { [Op.contains]: { foo: 'bar' } },
           },
           {
-            postgres: '"jsonbTypeLiteralAttr" @> \'{"foo":"bar"}\'',
+            postgres: '"jsonbTypeLiteralAttr" @> \'{"foo":"bar"}\'::JSONB',
           },
         );
 
@@ -3592,7 +3592,7 @@ Caused by: "undefined" cannot be escaped`),
             jsonbTypeLiteralAttr: { [Op.contains]: { bad: 'bad' } },
           },
           {
-            postgres: '"jsonbTypeLiteralAttr" @> \'{"bad":"bad"}\'',
+            postgres: '"jsonbTypeLiteralAttr" @> \'{"bad":"bad"}\'::JSONB',
           },
         );
 
@@ -3601,7 +3601,7 @@ Caused by: "undefined" cannot be escaped`),
             jsonbInterfaceAttr: { [Op.contains]: { foo: 'bar' } },
           },
           {
-            postgres: '"jsonbInterfaceAttr" @> \'{"foo":"bar"}\'',
+            postgres: '"jsonbInterfaceAttr" @> \'{"foo":"bar"}\'::JSONB',
           },
         );
 
@@ -3611,7 +3611,40 @@ Caused by: "undefined" cannot be escaped`),
             jsonbInterfaceAttr: { [Op.contains]: { bad: 'bad' } },
           },
           {
-            postgres: '"jsonbInterfaceAttr" @> \'{"bad":"bad"}\'',
+            postgres: '"jsonbInterfaceAttr" @> \'{"bad":"bad"}\'::JSONB',
+          },
+        );
+
+        testSql(
+          {
+            jsonbAttr: {
+              [Op.contains]: [1],
+            },
+          },
+          {
+            default: `[jsonbAttr] @> '[1]'::JSONB`,
+          },
+        );
+
+        testSql(
+          {
+            jsonbAttr: {
+              [Op.contains]: [1, 2],
+            },
+          },
+          {
+            default: `[jsonbAttr] @> '[1,2]'::JSONB`,
+          },
+        );
+
+        testSql(
+          {
+            jsonbAttr: {
+              [Op.contained]: [1],
+            },
+          },
+          {
+            default: `[jsonbAttr] <@ '[1]'::JSONB`,
           },
         );
 

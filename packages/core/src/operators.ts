@@ -89,7 +89,7 @@ export interface OpTypes {
    */
   readonly col: unique symbol;
   /**
-   * Operator <@ (PG array contained by operator)
+   * Operator <@ (PG array/JSONB contained by operator)
    *
    * ```js
    * [Op.contained]: [1, 2]
@@ -101,7 +101,7 @@ export interface OpTypes {
    */
   readonly contained: unique symbol;
   /**
-   * Operator @> (PG array contains operator)
+   * Operator @> (PG range/array/JSONB contains operator)
    *
    * ```js
    * [Op.contains]: [1, 2]

@@ -457,6 +457,7 @@ export class WhereSqlBuilder {
     // - RANGE<VALUE> Op.contains RANGE<VALUE> (both represented by fixed-size arrays in JS)
     // - RANGE<VALUE> Op.contains VALUE
     // - ARRAY<VALUE> Op.contains ARRAY<VALUE>
+    // - JSONB Op.contains JSONB (right operand must be serialized as JSON, not as SQL ARRAY)
     // When the left operand is a range RANGE, we must be able to serialize the right operand as either a RANGE or a VALUE.
     if (!rightDataType && leftDataType instanceof DataTypes.RANGE && !Array.isArray(right)) {
       // This serializes the right operand as a VALUE
@@ -468,6 +469,14 @@ export class WhereSqlBuilder {
         leftDataType.options.subtype,
         options,
       );
+    }
+
+    if (
+      !rightDataType &&
+      leftDataType instanceof DataTypes.JSON &&
+      !(right instanceof BaseSqlExpression)
+    ) {
+      return this.formatBinaryOperation(left, leftDataType, operator, right, leftDataType, options);
     }
 
     // This serializes the right operand as a RANGE (or an array for ARRAY contains ARRAY)
@@ -486,12 +495,22 @@ export class WhereSqlBuilder {
     // - RANGE<VALUE> Op.contained RANGE<VALUE> (both represented by fixed-size arrays in JS)
     // - VALUE Op.contained RANGE<VALUE>
     // - ARRAY<VALUE> Op.contained ARRAY<VALUE>
+    // - JSONB Op.contained JSONB (right operand must be serialized as JSON, not as SQL ARRAY)
+
+    if (
+      !rightDataType &&
+      leftDataType instanceof DataTypes.JSON &&
+      !(right instanceof BaseSqlExpression)
+    ) {
+      return this.formatBinaryOperation(left, leftDataType, operator, right, leftDataType, options);
+    }
 
     // This serializes VALUE contained RANGE
     if (
       leftDataType instanceof DataTypes.AbstractDataType &&
       !(leftDataType instanceof DataTypes.RANGE) &&
       !(leftDataType instanceof DataTypes.ARRAY) &&
+      !(leftDataType instanceof DataTypes.JSON) &&
       Array.isArray(right)
     ) {
       return this.formatBinaryOperation(

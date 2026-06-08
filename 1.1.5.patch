@@ -1,0 +1,183 @@
+diff --git a/packages/core/src/abstract-dialect/where-sql-builder.ts b/packages/core/src/abstract-dialect/where-sql-builder.ts
+index d55f992e4..2f33b6e35 100644
+--- a/packages/core/src/abstract-dialect/where-sql-builder.ts
++++ b/packages/core/src/abstract-dialect/where-sql-builder.ts
+@@ -457,6 +457,7 @@ export class WhereSqlBuilder {
+     // - RANGE<VALUE> Op.contains RANGE<VALUE> (both represented by fixed-size arrays in JS)
+     // - RANGE<VALUE> Op.contains VALUE
+     // - ARRAY<VALUE> Op.contains ARRAY<VALUE>
++    // - JSONB Op.contains JSONB (right operand must be serialized as JSON, not as SQL ARRAY)
+     // When the left operand is a range RANGE, we must be able to serialize the right operand as either a RANGE or a VALUE.
+     if (!rightDataType && leftDataType instanceof DataTypes.RANGE && !Array.isArray(right)) {
+       // This serializes the right operand as a VALUE
+@@ -470,6 +471,14 @@ export class WhereSqlBuilder {
+       );
+     }
+ 
++    if (
++      !rightDataType &&
++      leftDataType instanceof DataTypes.JSON &&
++      !(right instanceof BaseSqlExpression)
++    ) {
++      return this.formatBinaryOperation(left, leftDataType, operator, right, leftDataType, options);
++    }
++
+     // This serializes the right operand as a RANGE (or an array for ARRAY contains ARRAY)
+     return this.formatBinaryOperation(left, leftDataType, operator, right, rightDataType, options);
+   }
+@@ -486,12 +495,22 @@ export class WhereSqlBuilder {
+     // - RANGE<VALUE> Op.contained RANGE<VALUE> (both represented by fixed-size arrays in JS)
+     // - VALUE Op.contained RANGE<VALUE>
+     // - ARRAY<VALUE> Op.contained ARRAY<VALUE>
++    // - JSONB Op.contained JSONB (right operand must be serialized as JSON, not as SQL ARRAY)
++
++    if (
++      !rightDataType &&
++      leftDataType instanceof DataTypes.JSON &&
++      !(right instanceof BaseSqlExpression)
++    ) {
++      return this.formatBinaryOperation(left, leftDataType, operator, right, leftDataType, options);
++    }
+ 
+     // This serializes VALUE contained RANGE
+     if (
+       leftDataType instanceof DataTypes.AbstractDataType &&
+       !(leftDataType instanceof DataTypes.RANGE) &&
+       !(leftDataType instanceof DataTypes.ARRAY) &&
++      !(leftDataType instanceof DataTypes.JSON) &&
+       Array.isArray(right)
+     ) {
+       return this.formatBinaryOperation(
+diff --git a/packages/core/src/operators.ts b/packages/core/src/operators.ts
+index e99009611..15330ea0a 100644
+--- a/packages/core/src/operators.ts
++++ b/packages/core/src/operators.ts
+@@ -89,7 +89,7 @@ export interface OpTypes {
+    */
+   readonly col: unique symbol;
+   /**
+-   * Operator <@ (PG array contained by operator)
++   * Operator <@ (PG array/JSONB contained by operator)
+    *
+    * ```js
+    * [Op.contained]: [1, 2]
+@@ -101,7 +101,7 @@ export interface OpTypes {
+    */
+   readonly contained: unique symbol;
+   /**
+-   * Operator @> (PG array contains operator)
++   * Operator @> (PG range/array/JSONB contains operator)
+    *
+    * ```js
+    * [Op.contains]: [1, 2]
+diff --git a/packages/core/test/unit/sql/where.test.ts b/packages/core/test/unit/sql/where.test.ts
+index a7a2ac84f..280556180 100644
+--- a/packages/core/test/unit/sql/where.test.ts
++++ b/packages/core/test/unit/sql/where.test.ts
+@@ -3573,7 +3573,7 @@ Caused by: "undefined" cannot be escaped`),
+             },
+           },
+           {
+-            default: `[jsonbAttr] @> '{"company":"Magnafone"}'`,
++            default: `[jsonbAttr] @> '{"company":"Magnafone"}'::JSONB`,
+           },
+         );
+ 
+@@ -3582,7 +3582,7 @@ Caused by: "undefined" cannot be escaped`),
+             jsonbTypeLiteralAttr: { [Op.contains]: { foo: 'bar' } },
+           },
+           {
+-            postgres: '"jsonbTypeLiteralAttr" @> \'{"foo":"bar"}\'',
++            postgres: '"jsonbTypeLiteralAttr" @> \'{"foo":"bar"}\'::JSONB',
+           },
+         );
+ 
+@@ -3592,7 +3592,7 @@ Caused by: "undefined" cannot be escaped`),
+             jsonbTypeLiteralAttr: { [Op.contains]: { bad: 'bad' } },
+           },
+           {
+-            postgres: '"jsonbTypeLiteralAttr" @> \'{"bad":"bad"}\'',
++            postgres: '"jsonbTypeLiteralAttr" @> \'{"bad":"bad"}\'::JSONB',
+           },
+         );
+ 
+@@ -3601,7 +3601,7 @@ Caused by: "undefined" cannot be escaped`),
+             jsonbInterfaceAttr: { [Op.contains]: { foo: 'bar' } },
+           },
+           {
+-            postgres: '"jsonbInterfaceAttr" @> \'{"foo":"bar"}\'',
++            postgres: '"jsonbInterfaceAttr" @> \'{"foo":"bar"}\'::JSONB',
+           },
+         );
+ 
+@@ -3611,7 +3611,40 @@ Caused by: "undefined" cannot be escaped`),
+             jsonbInterfaceAttr: { [Op.contains]: { bad: 'bad' } },
+           },
+           {
+-            postgres: '"jsonbInterfaceAttr" @> \'{"bad":"bad"}\'',
++            postgres: '"jsonbInterfaceAttr" @> \'{"bad":"bad"}\'::JSONB',
++          },
++        );
++
++        testSql(
++          {
++            jsonbAttr: {
++              [Op.contains]: [1],
++            },
++          },
++          {
++            default: `[jsonbAttr] @> '[1]'::JSONB`,
++          },
++        );
++
++        testSql(
++          {
++            jsonbAttr: {
++              [Op.contains]: [1, 2],
++            },
++          },
++          {
++            default: `[jsonbAttr] @> '[1,2]'::JSONB`,
++          },
++        );
++
++        testSql(
++          {
++            jsonbAttr: {
++              [Op.contained]: [1],
++            },
++          },
++          {
++            default: `[jsonbAttr] <@ '[1]'::JSONB`,
+           },
+         );
+ 
+diff --git a/packages/postgres/src/_internal/data-types-overrides.ts b/packages/postgres/src/_internal/data-types-overrides.ts
+index da82c5b5c..219d6bf2d 100644
+--- a/packages/postgres/src/_internal/data-types-overrides.ts
++++ b/packages/postgres/src/_internal/data-types-overrides.ts
+@@ -406,6 +406,24 @@ export class ARRAY<T extends BaseTypes.AbstractDataType<any>> extends BaseTypes.
+   }
+ }
+ 
++export class JSONB extends BaseTypes.JSONB {
++  escape(value: any): string {
++    const asBindValue = this.toBindableValue(value);
++
++    if (!isString(asBindValue)) {
++      throw new Error(
++        `${this.constructor.name}#stringify has been overridden to return a non-string value, so ${this.constructor.name}#escape must be implemented to handle that value correctly.`,
++      );
++    }
++
++    return `${this._getDialect().escapeString(asBindValue)}::${this.toSql()}`;
++  }
++
++  getBindParamSql(value: any, options: BindParamOptions): string {
++    return `${options.bindParam(this.toBindableValue(value))}::${this.toSql()}`;
++  }
++}
++
+ export class ENUM<Members extends string> extends BaseTypes.ENUM<Members> {
+   override toSql(): string {
+     const context = this.usageContext;
