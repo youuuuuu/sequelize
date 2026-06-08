@@ -64,6 +64,20 @@ export class AbstractConnectionManager<
     throw new Error(`validate not implemented in ${this.constructor.name}`);
   }
 
+  /**
+   * Perform a health check on the connection.
+   * By default, this uses the validate method, but can be overridden to perform a more thorough check.
+   *
+   * @param connection
+   */
+  async healthCheck(connection: TConnection): Promise<boolean> {
+    try {
+      return this.validate(connection);
+    } catch {
+      return false;
+    }
+  }
+
   async connect(_config: ConnectionOptions<Dialect>): Promise<TConnection> {
     throw new Error(`connect not implemented in ${this.constructor.name}`);
   }

@@ -692,6 +692,17 @@ Connection options can be used at the root of the option bag, in the "replicatio
 
         return this.dialect.connectionManager.validate(connection);
       },
+      healthCheck: options.pool?.healthCheck?.check 
+        ? options.pool.healthCheck.check 
+        : async (connection: Connection<Dialect>): Promise<boolean> => {
+            try {
+              return await this.dialect.connectionManager.healthCheck(connection);
+            } catch {
+              return false;
+            }
+          },
+      healthCheckMode: options.pool?.healthCheck?.mode,
+      healthCheckInterval: options.pool?.healthCheck?.interval,
       beforeAcquire: async (acquireOptions: AcquireConnectionOptions): Promise<void> => {
         return this.hooks.runAsync('beforePoolAcquire', acquireOptions);
       },

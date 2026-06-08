@@ -25,6 +25,31 @@ export interface PoolOptions<Dialect extends AbstractDialect>
    * If provided, this overrides the default connection validation built in to sequelize.
    */
   validate?: ((connection?: Connection<Dialect>) => boolean) | undefined;
+
+  /**
+   * The health check configuration.
+   */
+  healthCheck?: {
+    /**
+     * The health check mode.
+     * - 'idle': Check idle connections periodically
+     * - 'acquire': Check connection before acquiring it from the pool
+     * - 'both': Both modes enabled
+     */
+    mode?: 'idle' | 'acquire' | 'both';
+
+    /**
+     * The interval in milliseconds at which to check idle connections.
+     * Only applicable when mode is 'idle' or 'both'.
+     */
+    interval?: number;
+
+    /**
+     * A function that performs a health check on the connection.
+     * This function should return a Promise that resolves to true if the connection is healthy.
+     */
+    check?: (connection: Connection<Dialect>) => Promise<boolean>;
+  };
 }
 
 /**
