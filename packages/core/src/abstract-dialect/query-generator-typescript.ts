@@ -16,6 +16,7 @@ import { DialectAwareFn } from '../expression-builders/dialect-aware-fn.js';
 import { Fn } from '../expression-builders/fn.js';
 import { Identifier } from '../expression-builders/identifier.js';
 import { JsonPath } from '../expression-builders/json-path.js';
+import { JsonTable } from '../expression-builders/json-table.js';
 import { List } from '../expression-builders/list.js';
 import { Literal } from '../expression-builders/literal.js';
 import { Value } from '../expression-builders/value.js';
@@ -790,6 +791,16 @@ export class AbstractQueryGeneratorTypeScript<Dialect extends AbstractDialect = 
 
     if (piece instanceof DialectAwareFn) {
       return this.#internals.formatDialectAwareFn(piece, options);
+    }
+
+    if (piece instanceof JsonTable) {
+      // @ts-expect-error -- jsonTable method is implemented by specific dialects
+      if (typeof this.jsonTable === 'function') {
+        // @ts-expect-error -- jsonTable method is implemented by specific dialects
+        return this.jsonTable(piece, options);
+      }
+
+      throw new Error(`JSON_TABLE is not supported by ${this.dialect.name} dialect`);
     }
 
     throw new Error(`Unknown sequelize method ${piece.constructor.name}`);

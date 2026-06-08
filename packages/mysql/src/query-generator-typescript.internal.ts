@@ -20,6 +20,7 @@ import { EMPTY_SET } from '@sequelize/core/_non-semver-use-at-your-own-risk_/uti
 import { generateIndexName } from '@sequelize/core/_non-semver-use-at-your-own-risk_/utils/string.js';
 import type { MySqlDialect } from './dialect.js';
 import { MySqlQueryGeneratorInternal } from './query-generator.internal.js';
+import type { JsonTable } from '@sequelize/core/expression-builders/json-table.js';
 
 /**
  * Temporary class to ease the TypeScript migration
@@ -182,5 +183,12 @@ export class MySqlQueryGeneratorTypeScript extends AbstractQueryGenerator {
 
   getRandomFloatFunctionCall(): string {
     return 'RAND()';
+  }
+
+  jsonTable(jsonTableExpr: JsonTable, options?: EscapeOptions): string {
+    return (this as unknown as { jsonTable(jsonTableExpr: JsonTable, options?: EscapeOptions): string }).jsonTable(
+      jsonTableExpr,
+      options,
+    );
   }
 }

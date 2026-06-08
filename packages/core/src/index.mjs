@@ -16,6 +16,7 @@ export const Where = Pkg.Where;
 export const List = Pkg.List;
 export const Identifier = Pkg.Identifier;
 export const JsonPath = Pkg.JsonPath;
+export const JsonTable = Pkg.JsonTable;
 export const AssociationPath = Pkg.AssociationPath;
 export const Attribute = Pkg.Attribute;
 export const Value = Pkg.Value;

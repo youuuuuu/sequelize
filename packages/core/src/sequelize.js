@@ -27,6 +27,7 @@ import { Col, col } from './expression-builders/col.js';
 import { Fn, fn } from './expression-builders/fn.js';
 import { Identifier } from './expression-builders/identifier';
 import { JsonPath } from './expression-builders/json-path';
+import { JsonTable, jsonTable } from './expression-builders/json-table';
 import { JSON_NULL, SQL_NULL } from './expression-builders/json-sql-null.js';
 import { json } from './expression-builders/json.js';
 import { List } from './expression-builders/list';
@@ -635,6 +636,7 @@ Use Sequelize#query if you wish to use replacements.`);
   static Value = Value;
   static AssociationPath = AssociationPath;
   static JsonPath = JsonPath;
+  static JsonTable = JsonTable;
 
   static sql = sql;
 

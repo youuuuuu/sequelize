@@ -53,6 +53,7 @@ export { Attribute } from './expression-builders/attribute.js';
 export { BaseSqlExpression } from './expression-builders/base-sql-expression.js';
 export { Identifier } from './expression-builders/identifier.js';
 export { JsonPath } from './expression-builders/json-path.js';
+export { JsonTable, jsonTable } from './expression-builders/json-table.js';
 export { JSON_NULL, SQL_NULL } from './expression-builders/json-sql-null.js';
 export { List } from './expression-builders/list.js';
 export { sql } from './expression-builders/sql.js';

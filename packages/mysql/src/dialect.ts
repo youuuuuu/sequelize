@@ -83,6 +83,7 @@ export class MySqlDialect extends AbstractDialect<MySqlDialectOptions, MySqlConn
       JSON: true,
     },
     jsonOperations: true,
+    jsonTable: true,
     jsonExtraction: {
       unquoted: true,
       quoted: true,

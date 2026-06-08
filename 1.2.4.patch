@@ -1,0 +1,177 @@
+diff --git a/packages/core/src/abstract-dialect/query-generator-typescript.ts b/packages/core/src/abstract-dialect/query-generator-typescript.ts
+index f4a235643..f699bb8d4 100644
+--- a/packages/core/src/abstract-dialect/query-generator-typescript.ts
++++ b/packages/core/src/abstract-dialect/query-generator-typescript.ts
+@@ -16,6 +16,7 @@ import { DialectAwareFn } from '../expression-builders/dialect-aware-fn.js';
+ import { Fn } from '../expression-builders/fn.js';
+ import { Identifier } from '../expression-builders/identifier.js';
+ import { JsonPath } from '../expression-builders/json-path.js';
++import { JsonTable } from '../expression-builders/json-table.js';
+ import { List } from '../expression-builders/list.js';
+ import { Literal } from '../expression-builders/literal.js';
+ import { Value } from '../expression-builders/value.js';
+@@ -792,6 +793,16 @@ export class AbstractQueryGeneratorTypeScript<Dialect extends AbstractDialect =
+       return this.#internals.formatDialectAwareFn(piece, options);
+     }
+ 
++    if (piece instanceof JsonTable) {
++      // @ts-expect-error -- jsonTable method is implemented by specific dialects
++      if (typeof this.jsonTable === 'function') {
++        // @ts-expect-error -- jsonTable method is implemented by specific dialects
++        return this.jsonTable(piece, options);
++      }
++
++      throw new Error(`JSON_TABLE is not supported by ${this.dialect.name} dialect`);
++    }
++
+     throw new Error(`Unknown sequelize method ${piece.constructor.name}`);
+   }
+ 
+diff --git a/packages/core/src/expression-builders/sql.ts b/packages/core/src/expression-builders/sql.ts
+index fb87432c6..b1d20f080 100644
+--- a/packages/core/src/expression-builders/sql.ts
++++ b/packages/core/src/expression-builders/sql.ts
+@@ -7,6 +7,7 @@ import { Unquote } from './dialect-aware-fn.js';
+ import { fn } from './fn.js';
+ import { identifier } from './identifier.js';
+ import { jsonPath } from './json-path.js';
++import { jsonTable } from './json-table.js';
+ import { list } from './list.js';
+ import { Literal, literal } from './literal.js';
+ import { Random } from './random.js';
+@@ -77,3 +78,4 @@ sql.uuidV7 = SqlUuidV7.build();
+ sql.random = Random.build();
+ sql.unquote = Unquote.build.bind(Unquote);
+ sql.join = joinSql;
++sql.jsonTable = jsonTable;
+diff --git a/packages/core/src/index.d.ts b/packages/core/src/index.d.ts
+index c8c4904ba..79cf0ca76 100644
+--- a/packages/core/src/index.d.ts
++++ b/packages/core/src/index.d.ts
+@@ -53,6 +53,7 @@ export { Attribute } from './expression-builders/attribute.js';
+ export { BaseSqlExpression } from './expression-builders/base-sql-expression.js';
+ export { Identifier } from './expression-builders/identifier.js';
+ export { JsonPath } from './expression-builders/json-path.js';
++export { JsonTable, jsonTable } from './expression-builders/json-table.js';
+ export { JSON_NULL, SQL_NULL } from './expression-builders/json-sql-null.js';
+ export { List } from './expression-builders/list.js';
+ export { sql } from './expression-builders/sql.js';
+diff --git a/packages/core/src/index.mjs b/packages/core/src/index.mjs
+index e3c7a08d7..2a00a20e6 100644
+--- a/packages/core/src/index.mjs
++++ b/packages/core/src/index.mjs
+@@ -16,6 +16,7 @@ export const Where = Pkg.Where;
+ export const List = Pkg.List;
+ export const Identifier = Pkg.Identifier;
+ export const JsonPath = Pkg.JsonPath;
++export const JsonTable = Pkg.JsonTable;
+ export const AssociationPath = Pkg.AssociationPath;
+ export const Attribute = Pkg.Attribute;
+ export const Value = Pkg.Value;
+diff --git a/packages/core/src/sequelize.js b/packages/core/src/sequelize.js
+index 763ad7383..35170b041 100644
+--- a/packages/core/src/sequelize.js
++++ b/packages/core/src/sequelize.js
+@@ -27,6 +27,7 @@ import { Col, col } from './expression-builders/col.js';
+ import { Fn, fn } from './expression-builders/fn.js';
+ import { Identifier } from './expression-builders/identifier';
+ import { JsonPath } from './expression-builders/json-path';
++import { JsonTable, jsonTable } from './expression-builders/json-table';
+ import { JSON_NULL, SQL_NULL } from './expression-builders/json-sql-null.js';
+ import { json } from './expression-builders/json.js';
+ import { List } from './expression-builders/list';
+@@ -635,6 +636,7 @@ Use Sequelize#query if you wish to use replacements.`);
+   static Value = Value;
+   static AssociationPath = AssociationPath;
+   static JsonPath = JsonPath;
++  static JsonTable = JsonTable;
+ 
+   static sql = sql;
+ 
+diff --git a/packages/mysql/src/dialect.ts b/packages/mysql/src/dialect.ts
+index 6bdbe79c6..9de1eb1e6 100644
+--- a/packages/mysql/src/dialect.ts
++++ b/packages/mysql/src/dialect.ts
+@@ -83,6 +83,7 @@ export class MySqlDialect extends AbstractDialect<MySqlDialectOptions, MySqlConn
+       JSON: true,
+     },
+     jsonOperations: true,
++    jsonTable: true,
+     jsonExtraction: {
+       unquoted: true,
+       quoted: true,
+diff --git a/packages/mysql/src/query-generator-typescript.internal.ts b/packages/mysql/src/query-generator-typescript.internal.ts
+index 17d0f80c7..8de313ee2 100644
+--- a/packages/mysql/src/query-generator-typescript.internal.ts
++++ b/packages/mysql/src/query-generator-typescript.internal.ts
+@@ -20,6 +20,7 @@ import { EMPTY_SET } from '@sequelize/core/_non-semver-use-at-your-own-risk_/uti
+ import { generateIndexName } from '@sequelize/core/_non-semver-use-at-your-own-risk_/utils/string.js';
+ import type { MySqlDialect } from './dialect.js';
+ import { MySqlQueryGeneratorInternal } from './query-generator.internal.js';
++import type { JsonTable } from '@sequelize/core/expression-builders/json-table.js';
+ 
+ /**
+  * Temporary class to ease the TypeScript migration
+@@ -183,4 +184,11 @@ export class MySqlQueryGeneratorTypeScript extends AbstractQueryGenerator {
+   getRandomFloatFunctionCall(): string {
+     return 'RAND()';
+   }
++
++  jsonTable(jsonTableExpr: JsonTable, options?: EscapeOptions): string {
++    return (this as unknown as { jsonTable(jsonTableExpr: JsonTable, options?: EscapeOptions): string }).jsonTable(
++      jsonTableExpr,
++      options,
++    );
++  }
+ }
+diff --git a/packages/mysql/src/query-generator.js b/packages/mysql/src/query-generator.js
+index a5a5653b8..e7fd4c417 100644
+--- a/packages/mysql/src/query-generator.js
++++ b/packages/mysql/src/query-generator.js
+@@ -287,4 +287,46 @@ export class MySqlQueryGenerator extends MySqlQueryGeneratorTypeScript {
+ 
+     return fragment;
+   }
++
++  jsonTable(jsonTableExpr, options) {
++    const { jsonExpr, path, columns, alias } = jsonTableExpr;
++
++    const columnDefs = columns.map(col => {
++      let colDef = this.quoteIdentifier(col.name);
++
++      if (col.type) {
++        colDef += ` ${col.type}`;
++      }
++
++      if (col.path) {
++        colDef += ` PATH ${this.escape(col.path)}`;
++      }
++
++      if (col.defaultOnEmpty !== undefined) {
++        colDef += ` DEFAULT ${this.escape(col.defaultOnEmpty)} ON EMPTY`;
++      } else if (col.nullOnEmpty) {
++        colDef += ' NULL ON EMPTY';
++      } else if (col.errorOnEmpty) {
++        colDef += ' ERROR ON EMPTY';
++      }
++
++      if (col.defaultOnError !== undefined) {
++        colDef += ` DEFAULT ${this.escape(col.defaultOnError)} ON ERROR`;
++      } else if (col.nullOnError) {
++        colDef += ' NULL ON ERROR';
++      } else if (col.errorOnError) {
++        colDef += ' ERROR ON ERROR';
++      }
++
++      return colDef;
++    });
++
++    let result = `JSON_TABLE(${this.escape(jsonExpr, options)}, ${this.escape(path)} COLUMNS (${columnDefs.join(', ')}))`;
++
++    if (alias) {
++      result += ` AS ${this.quoteIdentifier(alias)}`;
++    }
++
++    return result;
++  }
+ }
