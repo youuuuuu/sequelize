@@ -1,11 +1,13 @@
 'use strict';
 
-import { DataTypes } from '@sequelize/core';
+import { DataTypes, Op, literal } from '@sequelize/core';
 import { CREATE_TABLE_QUERY_SUPPORTABLE_OPTIONS } from '@sequelize/core/_non-semver-use-at-your-own-risk_/abstract-dialect/query-generator.js';
 import { rejectInvalidOptions } from '@sequelize/core/_non-semver-use-at-your-own-risk_/utils/check.js';
 import { quoteIdentifier } from '@sequelize/core/_non-semver-use-at-your-own-risk_/utils/dialect.js';
+import { extractModelDefinition } from '@sequelize/core/_non-semver-use-at-your-own-risk_/utils/model-utils.js';
 import { defaultValueSchemable } from '@sequelize/core/_non-semver-use-at-your-own-risk_/utils/query-builder-utils.js';
 import { generateIndexName } from '@sequelize/core/_non-semver-use-at-your-own-risk_/utils/string.js';
+import { getOperators } from '@sequelize/core/_non-semver-use-at-your-own-risk_/utils/where.js';
 import each from 'lodash/each';
 import isEmpty from 'lodash/isEmpty';
 import isPlainObject from 'lodash/isPlainObject';
@@ -35,6 +37,80 @@ export class PostgresQueryGenerator extends PostgresQueryGeneratorTypeScript {
     super(dialect, internals);
 
     this.#internals = internals;
+  }
+
+  whereItemsQuery(where, options) {
+    const modelDefinition = options?.model ? extractModelDefinition(options.model) : null;
+    const transformedWhere = modelDefinition
+      ? this._transformJsonbContainsWhere(where, modelDefinition)
+      : where;
+
+    return super.whereItemsQuery(transformedWhere, options);
+  }
+
+  _transformJsonbContainsWhere(where, modelDefinition) {
+    if (Array.isArray(where)) {
+      let changed = false;
+      const transformedWhere = where.map(part => {
+        const transformedPart = this._transformJsonbContainsWhere(part, modelDefinition);
+        changed ||= transformedPart !== part;
+
+        return transformedPart;
+      });
+
+      return changed ? transformedWhere : where;
+    }
+
+    if (!isPlainObject(where)) {
+      return where;
+    }
+
+    let changed = false;
+    const transformedWhere = {};
+
+    for (const key of Object.keys(where)) {
+      const attribute = modelDefinition.attributes.get(key);
+      const value = where[key];
+      let transformedValue = value;
+
+      if (attribute?.type instanceof DataTypes.JSONB && isPlainObject(value) && Op.contains in value) {
+        transformedValue = this._whereJsonContains(attribute.type, value);
+      }
+
+      changed ||= transformedValue !== value;
+      transformedWhere[key] = transformedValue;
+    }
+
+    for (const operator of getOperators(where)) {
+      const value = where[operator];
+      const transformedValue =
+        operator === Op.and || operator === Op.or || operator === Op.not
+          ? this._transformJsonbContainsWhere(value, modelDefinition)
+          : value;
+
+      changed ||= transformedValue !== value;
+      transformedWhere[operator] = transformedValue;
+    }
+
+    return changed ? transformedWhere : where;
+  }
+
+  _whereJsonContains(dataType, value) {
+    const containsValue = value[Op.contains];
+
+    if (!Array.isArray(containsValue) || containsValue.length !== 1) {
+      return value;
+    }
+
+    const databaseValue =
+      typeof dataType.toDatabaseValue === 'function'
+        ? dataType.toDatabaseValue(containsValue)
+        : dataType.toBindableValue(containsValue);
+
+    return {
+      ...value,
+      [Op.contains]: literal(this.escape(databaseValue)),
+    };
   }
 
   setSearchPath(searchPath) {

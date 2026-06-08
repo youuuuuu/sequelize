@@ -291,6 +291,16 @@ export class GEOGRAPHY extends BaseTypes.GEOGRAPHY {
   }
 }
 
+export class JSONB extends BaseTypes.JSONB {
+  toDatabaseValue(value: AcceptableTypeOf<BaseTypes.JSONB>): string {
+    return super.toBindableValue(value);
+  }
+
+  toBindableValue(value: AcceptableTypeOf<BaseTypes.JSONB>): string {
+    return this.toDatabaseValue(value);
+  }
+}
+
 export class HSTORE extends BaseTypes.HSTORE {
   toBindableValue(value: AcceptableTypeOf<BaseTypes.HSTORE>): string {
     if (value == null) {

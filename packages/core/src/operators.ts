@@ -101,7 +101,7 @@ export interface OpTypes {
    */
   readonly contained: unique symbol;
   /**
-   * Operator @> (PG array contains operator)
+   * Operator @> (PG array, range & JSONB contains operator)
    *
    * ```js
    * [Op.contains]: [1, 2]
