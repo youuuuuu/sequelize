@@ -1,0 +1,218 @@
+diff --git a/packages/core/src/model-typescript.ts b/packages/core/src/model-typescript.ts
+index 22afb6675..a4814846b 100644
+--- a/packages/core/src/model-typescript.ts
++++ b/packages/core/src/model-typescript.ts
+@@ -341,7 +341,41 @@ export class ModelTypeScript {
+   }
+ 
+   static getIndexes(): readonly IndexOptions[] {
+-    return this.modelDefinition.getIndexes();
++    const indexes = [...this.modelDefinition.getIndexes()];
++    const modelDef = this.modelDefinition;
++
++    // 检查是否是 SQLite 方言且模型启用了软删除
++    if (modelDef.sequelize.dialect.name === 'sqlite' && modelDef.isParanoid()) {
++      const deletedAtAttrName = modelDef.timestampAttributeNames.deletedAt || 'deletedAt';
++      const deletedAtAttr = modelDef.attributes.get(deletedAtAttrName);
++      const deletedAtColumnName = deletedAtAttr?.columnName || deletedAtAttrName;
++
++      // 修改每个唯一索引，添加 deletedAt 字段
++      return indexes.map(index => {
++        if (index.unique) {
++          // 检查是否已经包含 deletedAt
++          const fields = index.fields || [];
++          const alreadyHasDeletedAt = fields.some(field => {
++            const fieldName = typeof field === 'string' ? field : field.name || field.attribute;
++            return fieldName === deletedAtColumnName;
++          });
++
++          if (!alreadyHasDeletedAt) {
++            // 复制索引对象并添加 deletedAt 字段
++            const modifiedIndex = { ...index };
++            modifiedIndex.fields = [...fields, deletedAtColumnName];
++            // 更新索引名称
++            if (modifiedIndex.name) {
++              modifiedIndex.name = `${modifiedIndex.name}_with_deletedAt`;
++            }
++            return modifiedIndex;
++          }
++        }
++        return index;
++      });
++    }
++
++    return indexes;
+   }
+ 
+   /**
+diff --git a/packages/sqlite3/src/query-generator.js b/packages/sqlite3/src/query-generator.js
+index 5e4dd1721..b3d59d1d9 100644
+--- a/packages/sqlite3/src/query-generator.js
++++ b/packages/sqlite3/src/query-generator.js
+@@ -256,6 +256,74 @@ export class SqliteQueryGenerator extends SqliteQueryGeneratorTypeScript {
+     return result;
+   }
+ 
++  addIndexQuery(tableName, attributes, options, rawTablename) {
++    let indexOptions = attributes;
++    let rawTableName = rawTablename;
++
++    // 处理参数，和父类保持一致
++    if (!Array.isArray(attributes)) {
++      indexOptions = attributes;
++      rawTableName = options;
++    }
++
++    // 深拷贝 options 以避免修改原对象
++    const optionsCopy = JSON.parse(JSON.stringify(indexOptions));
++
++    // 如果是唯一索引，检查模型是否启用了软删除
++    if (optionsCopy.unique) {
++      let isParanoid = false;
++      let deletedAtColumnName = 'deletedAt';
++
++      // 尝试从 tableName 获取模型定义
++      if (typeof tableName === 'object' && tableName !== null && tableName.model) {
++        const modelDef = tableName.model.modelDefinition;
++        if (modelDef) {
++          isParanoid = modelDef.isParanoid();
++          if (isParanoid) {
++            deletedAtColumnName = modelDef.timestampAttributeNames.deletedAt || 'deletedAt';
++            // 获取列名（考虑 underscore）
++            const deletedAtAttr = modelDef.attributes.get(deletedAtColumnName);
++            if (deletedAtAttr) {
++              deletedAtColumnName = deletedAtAttr.columnName || deletedAtColumnName;
++            }
++          }
++        }
++      } else if (typeof tableName === 'function' && tableName.modelDefinition) {
++        // 如果 tableName 是模型类
++        const modelDef = tableName.modelDefinition;
++        isParanoid = modelDef.isParanoid();
++        if (isParanoid) {
++          deletedAtColumnName = modelDef.timestampAttributeNames.deletedAt || 'deletedAt';
++          const deletedAtAttr = modelDef.attributes.get(deletedAtColumnName);
++          if (deletedAtAttr) {
++            deletedAtColumnName = deletedAtAttr.columnName || deletedAtColumnName;
++          }
++        }
++      }
++
++      // 如果模型是 paranoid，将 deletedAt 加入索引字段
++      if (isParanoid) {
++        // 检查 deletedAt 是否已经在索引字段中
++        const fields = optionsCopy.fields || [];
++        const alreadyHasDeletedAt = fields.some(field => {
++          const fieldName = typeof field === 'string' ? field : field.name || field.attribute;
++          return fieldName === deletedAtColumnName;
++        });
++
++        if (!alreadyHasDeletedAt) {
++          optionsCopy.fields = [...fields, deletedAtColumnName];
++          // 更新索引名称以包含 deletedAt
++          if (optionsCopy.name) {
++            optionsCopy.name = `${optionsCopy.name}_with_deletedAt`;
++          }
++        }
++      }
++    }
++
++    // 调用父类的 addIndexQuery
++    return super.addIndexQuery(tableName, optionsCopy, rawTableName);
++  }
++
+   replaceBooleanDefaults(sql) {
+     return sql
+       .replaceAll(/DEFAULT '?false'?/g, 'DEFAULT 0')
+diff --git a/packages/sqlite3/src/query-interface.ts b/packages/sqlite3/src/query-interface.ts
+index b89e1b420..f3778a252 100644
+--- a/packages/sqlite3/src/query-interface.ts
++++ b/packages/sqlite3/src/query-interface.ts
+@@ -517,6 +517,87 @@ export class SqliteQueryInterface<
+    * @param attrNameAfter
+    * @param options
+    */
++  async addIndex(
++    tableName: TableOrModel,
++    attributes: any,
++    options?: any,
++    rawTablename?: any,
++  ): Promise<void> {
++    // 先获取模型定义，用于检查是否启用了软删除
++    let modelDef: any = null;
++    let isParanoid = false;
++    let deletedAtColumnName = 'deletedAt';
++
++    if (typeof tableName === 'function' && tableName.modelDefinition) {
++      // 如果 tableName 是模型类
++      modelDef = tableName.modelDefinition;
++      isParanoid = modelDef.isParanoid();
++      if (isParanoid) {
++        deletedAtColumnName = modelDef.timestampAttributeNames.deletedAt || 'deletedAt';
++        const deletedAtAttr = modelDef.attributes.get(deletedAtColumnName);
++        if (deletedAtAttr) {
++          deletedAtColumnName = deletedAtAttr.columnName || deletedAtColumnName;
++        }
++      }
++    } else if (typeof tableName === 'object' && tableName !== null && tableName.model) {
++      // 如果 tableName 包含 model 属性
++      modelDef = tableName.model.modelDefinition;
++      if (modelDef) {
++        isParanoid = modelDef.isParanoid();
++        if (isParanoid) {
++          deletedAtColumnName = modelDef.timestampAttributeNames.deletedAt || 'deletedAt';
++          const deletedAtAttr = modelDef.attributes.get(deletedAtColumnName);
++          if (deletedAtAttr) {
++            deletedAtColumnName = deletedAtAttr.columnName || deletedAtColumnName;
++          }
++        }
++      }
++    }
++
++    // 处理参数
++    let indexOptions: any = attributes;
++    let rawTableName: any = rawTablename;
++    let fields: any[] = [];
++
++    if (!Array.isArray(attributes)) {
++      indexOptions = attributes;
++      rawTableName = options;
++      fields = indexOptions.fields || [];
++    } else {
++      fields = attributes;
++    }
++
++    // 复制索引选项，避免修改原对象
++    const modifiedOptions = JSON.parse(JSON.stringify(indexOptions));
++    if (Array.isArray(attributes)) {
++      modifiedOptions.fields = attributes;
++    }
++
++    // 如果是唯一索引且模型是 paranoid，将 deletedAt 加入索引字段
++    if (modifiedOptions.unique && isParanoid) {
++      // 检查 deletedAt 是否已经在索引字段中
++      const alreadyHasDeletedAt = fields.some(field => {
++        const fieldName = typeof field === 'string' ? field : field.name || field.attribute;
++        return fieldName === deletedAtColumnName;
++      });
++
++      if (!alreadyHasDeletedAt) {
++        modifiedOptions.fields = [...fields, deletedAtColumnName];
++        // 更新索引名称以包含 deletedAt
++        if (modifiedOptions.name) {
++          modifiedOptions.name = `${modifiedOptions.name}_with_deletedAt`;
++        }
++      }
++    }
++
++    // 调用父类的 addIndex
++    if (Array.isArray(attributes)) {
++      return super.addIndex(tableName, modifiedOptions.fields, modifiedOptions, rawTableName);
++    } else {
++      return super.addIndex(tableName, modifiedOptions, rawTableName);
++    }
++  }
++
+   async renameColumn(
+     tableName: TableOrModel,
+     attrNameBefore: string,

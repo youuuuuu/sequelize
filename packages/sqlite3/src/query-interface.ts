@@ -517,6 +517,87 @@ export class SqliteQueryInterface<
    * @param attrNameAfter
    * @param options
    */
+  async addIndex(
+    tableName: TableOrModel,
+    attributes: any,
+    options?: any,
+    rawTablename?: any,
+  ): Promise<void> {
+    // 先获取模型定义，用于检查是否启用了软删除
+    let modelDef: any = null;
+    let isParanoid = false;
+    let deletedAtColumnName = 'deletedAt';
+
+    if (typeof tableName === 'function' && tableName.modelDefinition) {
+      // 如果 tableName 是模型类
+      modelDef = tableName.modelDefinition;
+      isParanoid = modelDef.isParanoid();
+      if (isParanoid) {
+        deletedAtColumnName = modelDef.timestampAttributeNames.deletedAt || 'deletedAt';
+        const deletedAtAttr = modelDef.attributes.get(deletedAtColumnName);
+        if (deletedAtAttr) {
+          deletedAtColumnName = deletedAtAttr.columnName || deletedAtColumnName;
+        }
+      }
+    } else if (typeof tableName === 'object' && tableName !== null && tableName.model) {
+      // 如果 tableName 包含 model 属性
+      modelDef = tableName.model.modelDefinition;
+      if (modelDef) {
+        isParanoid = modelDef.isParanoid();
+        if (isParanoid) {
+          deletedAtColumnName = modelDef.timestampAttributeNames.deletedAt || 'deletedAt';
+          const deletedAtAttr = modelDef.attributes.get(deletedAtColumnName);
+          if (deletedAtAttr) {
+            deletedAtColumnName = deletedAtAttr.columnName || deletedAtColumnName;
+          }
+        }
+      }
+    }
+
+    // 处理参数
+    let indexOptions: any = attributes;
+    let rawTableName: any = rawTablename;
+    let fields: any[] = [];
+
+    if (!Array.isArray(attributes)) {
+      indexOptions = attributes;
+      rawTableName = options;
+      fields = indexOptions.fields || [];
+    } else {
+      fields = attributes;
+    }
+
+    // 复制索引选项，避免修改原对象
+    const modifiedOptions = JSON.parse(JSON.stringify(indexOptions));
+    if (Array.isArray(attributes)) {
+      modifiedOptions.fields = attributes;
+    }
+
+    // 如果是唯一索引且模型是 paranoid，将 deletedAt 加入索引字段
+    if (modifiedOptions.unique && isParanoid) {
+      // 检查 deletedAt 是否已经在索引字段中
+      const alreadyHasDeletedAt = fields.some(field => {
+        const fieldName = typeof field === 'string' ? field : field.name || field.attribute;
+        return fieldName === deletedAtColumnName;
+      });
+
+      if (!alreadyHasDeletedAt) {
+        modifiedOptions.fields = [...fields, deletedAtColumnName];
+        // 更新索引名称以包含 deletedAt
+        if (modifiedOptions.name) {
+          modifiedOptions.name = `${modifiedOptions.name}_with_deletedAt`;
+        }
+      }
+    }
+
+    // 调用父类的 addIndex
+    if (Array.isArray(attributes)) {
+      return super.addIndex(tableName, modifiedOptions.fields, modifiedOptions, rawTableName);
+    } else {
+      return super.addIndex(tableName, modifiedOptions, rawTableName);
+    }
+  }
+
   async renameColumn(
     tableName: TableOrModel,
     attrNameBefore: string,

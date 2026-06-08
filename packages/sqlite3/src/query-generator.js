@@ -256,6 +256,74 @@ export class SqliteQueryGenerator extends SqliteQueryGeneratorTypeScript {
     return result;
   }
 
+  addIndexQuery(tableName, attributes, options, rawTablename) {
+    let indexOptions = attributes;
+    let rawTableName = rawTablename;
+
+    // 处理参数，和父类保持一致
+    if (!Array.isArray(attributes)) {
+      indexOptions = attributes;
+      rawTableName = options;
+    }
+
+    // 深拷贝 options 以避免修改原对象
+    const optionsCopy = JSON.parse(JSON.stringify(indexOptions));
+
+    // 如果是唯一索引，检查模型是否启用了软删除
+    if (optionsCopy.unique) {
+      let isParanoid = false;
+      let deletedAtColumnName = 'deletedAt';
+
+      // 尝试从 tableName 获取模型定义
+      if (typeof tableName === 'object' && tableName !== null && tableName.model) {
+        const modelDef = tableName.model.modelDefinition;
+        if (modelDef) {
+          isParanoid = modelDef.isParanoid();
+          if (isParanoid) {
+            deletedAtColumnName = modelDef.timestampAttributeNames.deletedAt || 'deletedAt';
+            // 获取列名（考虑 underscore）
+            const deletedAtAttr = modelDef.attributes.get(deletedAtColumnName);
+            if (deletedAtAttr) {
+              deletedAtColumnName = deletedAtAttr.columnName || deletedAtColumnName;
+            }
+          }
+        }
+      } else if (typeof tableName === 'function' && tableName.modelDefinition) {
+        // 如果 tableName 是模型类
+        const modelDef = tableName.modelDefinition;
+        isParanoid = modelDef.isParanoid();
+        if (isParanoid) {
+          deletedAtColumnName = modelDef.timestampAttributeNames.deletedAt || 'deletedAt';
+          const deletedAtAttr = modelDef.attributes.get(deletedAtColumnName);
+          if (deletedAtAttr) {
+            deletedAtColumnName = deletedAtAttr.columnName || deletedAtColumnName;
+          }
+        }
+      }
+
+      // 如果模型是 paranoid，将 deletedAt 加入索引字段
+      if (isParanoid) {
+        // 检查 deletedAt 是否已经在索引字段中
+        const fields = optionsCopy.fields || [];
+        const alreadyHasDeletedAt = fields.some(field => {
+          const fieldName = typeof field === 'string' ? field : field.name || field.attribute;
+          return fieldName === deletedAtColumnName;
+        });
+
+        if (!alreadyHasDeletedAt) {
+          optionsCopy.fields = [...fields, deletedAtColumnName];
+          // 更新索引名称以包含 deletedAt
+          if (optionsCopy.name) {
+            optionsCopy.name = `${optionsCopy.name}_with_deletedAt`;
+          }
+        }
+      }
+    }
+
+    // 调用父类的 addIndexQuery
+    return super.addIndexQuery(tableName, optionsCopy, rawTableName);
+  }
+
   replaceBooleanDefaults(sql) {
     return sql
       .replaceAll(/DEFAULT '?false'?/g, 'DEFAULT 0')

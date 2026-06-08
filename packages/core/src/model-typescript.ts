@@ -341,7 +341,41 @@ export class ModelTypeScript {
   }
 
   static getIndexes(): readonly IndexOptions[] {
-    return this.modelDefinition.getIndexes();
+    const indexes = [...this.modelDefinition.getIndexes()];
+    const modelDef = this.modelDefinition;
+
+    // 检查是否是 SQLite 方言且模型启用了软删除
+    if (modelDef.sequelize.dialect.name === 'sqlite' && modelDef.isParanoid()) {
+      const deletedAtAttrName = modelDef.timestampAttributeNames.deletedAt || 'deletedAt';
+      const deletedAtAttr = modelDef.attributes.get(deletedAtAttrName);
+      const deletedAtColumnName = deletedAtAttr?.columnName || deletedAtAttrName;
+
+      // 修改每个唯一索引，添加 deletedAt 字段
+      return indexes.map(index => {
+        if (index.unique) {
+          // 检查是否已经包含 deletedAt
+          const fields = index.fields || [];
+          const alreadyHasDeletedAt = fields.some(field => {
+            const fieldName = typeof field === 'string' ? field : field.name || field.attribute;
+            return fieldName === deletedAtColumnName;
+          });
+
+          if (!alreadyHasDeletedAt) {
+            // 复制索引对象并添加 deletedAt 字段
+            const modifiedIndex = { ...index };
+            modifiedIndex.fields = [...fields, deletedAtColumnName];
+            // 更新索引名称
+            if (modifiedIndex.name) {
+              modifiedIndex.name = `${modifiedIndex.name}_with_deletedAt`;
+            }
+            return modifiedIndex;
+          }
+        }
+        return index;
+      });
+    }
+
+    return indexes;
   }
 
   /**
