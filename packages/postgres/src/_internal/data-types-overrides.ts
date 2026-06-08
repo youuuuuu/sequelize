@@ -406,6 +406,20 @@ export class ARRAY<T extends BaseTypes.AbstractDataType<any>> extends BaseTypes.
   }
 }
 
+export class JSONB extends BaseTypes.JSONB {
+  escape(value: any): string {
+    const jsonString = this.toBindableValue(value);
+
+    return `${this._getDialect().escapeString(jsonString)}::jsonb`;
+  }
+
+  getBindParamSql(value: any, options: BindParamOptions): string {
+    const jsonString = this.toBindableValue(value);
+
+    return `${options.bindParam(jsonString)}::jsonb`;
+  }
+}
+
 export class ENUM<Members extends string> extends BaseTypes.ENUM<Members> {
   override toSql(): string {
     const context = this.usageContext;

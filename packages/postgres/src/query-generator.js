@@ -657,4 +657,13 @@ export class PostgresQueryGenerator extends PostgresQueryGeneratorTypeScript {
 
     return identifier;
   }
+
+  _whereJsonContains(columnName, value) {
+    const columnSql = this.quoteIdentifier(columnName);
+    const escapedValue = this.escape(value, {
+      type: DataTypes.JSONB,
+    });
+
+    return `${columnSql} @> ${escapedValue}::jsonb`;
+  }
 }

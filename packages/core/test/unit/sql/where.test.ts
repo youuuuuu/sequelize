@@ -3461,7 +3461,7 @@ Caused by: "undefined" cannot be escaped`),
             },
           },
           {
-            postgres: `"User"."jsonbAttr"#>ARRAY['nested','attribute']::VARCHAR(255)[] = '"value"'`,
+            postgres: `"User"."jsonbAttr"#>ARRAY['nested','attribute']::VARCHAR(255)[] = '"value"'::jsonb`,
           },
           {
             mainAlias: 'User',
@@ -3477,7 +3477,7 @@ Caused by: "undefined" cannot be escaped`),
             },
           },
           {
-            postgres: `"jsonbAttr"->'nested' IN ('1', '2')`,
+            postgres: `"jsonbAttr"->'nested' IN ('1'::jsonb, '2'::jsonb)`,
           },
         );
 
@@ -3488,7 +3488,7 @@ Caused by: "undefined" cannot be escaped`),
             },
           },
           {
-            postgres: `"jsonbAttr"#>ARRAY['nested','attribute']::VARCHAR(255)[] IN ('3', '7')`,
+            postgres: `"jsonbAttr"#>ARRAY['nested','attribute']::VARCHAR(255)[] IN ('3'::jsonb, '7'::jsonb)`,
           },
         );
 
@@ -3501,7 +3501,7 @@ Caused by: "undefined" cannot be escaped`),
             },
           },
           {
-            postgres: `"jsonbAttr"->'nested' BETWEEN '1' AND '2'`,
+            postgres: `"jsonbAttr"->'nested' BETWEEN '1'::jsonb AND '2'::jsonb`,
           },
         );
 
@@ -3513,7 +3513,7 @@ Caused by: "undefined" cannot be escaped`),
             },
           },
           {
-            postgres: `"jsonbAttr"->'price' = '5' AND "jsonbAttr"->'name' = '"Product"'`,
+            postgres: `"jsonbAttr"->'price' = '5'::jsonb AND "jsonbAttr"->'name' = '"Product"'::jsonb`,
           },
         );
 
@@ -3529,7 +3529,7 @@ Caused by: "undefined" cannot be escaped`),
             },
           },
           {
-            postgres: `"User"."jsonbAttr"#>ARRAY['name','last']::VARCHAR(255)[] = '"Simpson"' AND "User"."jsonbAttr"->'employment' != '"None"'`,
+            postgres: `"User"."jsonbAttr"#>ARRAY['name','last']::VARCHAR(255)[] = '"Simpson"'::jsonb AND "User"."jsonbAttr"->'employment' != '"None"'::jsonb`,
           },
           {
             mainAlias: 'User',
@@ -3549,7 +3549,7 @@ Caused by: "undefined" cannot be escaped`),
             },
           },
           {
-            postgres: `"jsonbAttr"#>ARRAY['nested','attribute']::VARCHAR(255)[] > ${queryGen.escape(jsonDt)}`,
+            postgres: `"jsonbAttr"#>ARRAY['nested','attribute']::VARCHAR(255)[] > ${queryGen.escape(jsonDt, { type: DataTypes.JSONB })}`,
           },
         );
 
@@ -3562,7 +3562,7 @@ Caused by: "undefined" cannot be escaped`),
             },
           },
           {
-            postgres: `"jsonbAttr"#>ARRAY['nested','attribute']::VARCHAR(255)[] = 'true'`,
+            postgres: `"jsonbAttr"#>ARRAY['nested','attribute']::VARCHAR(255)[] = 'true'::jsonb`,
           },
         );
 
@@ -3574,6 +3574,7 @@ Caused by: "undefined" cannot be escaped`),
           },
           {
             default: `[jsonbAttr] @> '{"company":"Magnafone"}'`,
+            postgres: '"jsonbAttr" @> \'{"company":"Magnafone"}\'::jsonb',
           },
         );
 
@@ -3582,7 +3583,7 @@ Caused by: "undefined" cannot be escaped`),
             jsonbTypeLiteralAttr: { [Op.contains]: { foo: 'bar' } },
           },
           {
-            postgres: '"jsonbTypeLiteralAttr" @> \'{"foo":"bar"}\'',
+            postgres: '"jsonbTypeLiteralAttr" @> \'{"foo":"bar"}\'::jsonb',
           },
         );
 
@@ -3592,7 +3593,7 @@ Caused by: "undefined" cannot be escaped`),
             jsonbTypeLiteralAttr: { [Op.contains]: { bad: 'bad' } },
           },
           {
-            postgres: '"jsonbTypeLiteralAttr" @> \'{"bad":"bad"}\'',
+            postgres: '"jsonbTypeLiteralAttr" @> \'{"bad":"bad"}\'::jsonb',
           },
         );
 
@@ -3601,7 +3602,7 @@ Caused by: "undefined" cannot be escaped`),
             jsonbInterfaceAttr: { [Op.contains]: { foo: 'bar' } },
           },
           {
-            postgres: '"jsonbInterfaceAttr" @> \'{"foo":"bar"}\'',
+            postgres: '"jsonbInterfaceAttr" @> \'{"foo":"bar"}\'::jsonb',
           },
         );
 
@@ -3611,7 +3612,37 @@ Caused by: "undefined" cannot be escaped`),
             jsonbInterfaceAttr: { [Op.contains]: { bad: 'bad' } },
           },
           {
-            postgres: '"jsonbInterfaceAttr" @> \'{"bad":"bad"}\'',
+            postgres: '"jsonbInterfaceAttr" @> \'{"bad":"bad"}\'::jsonb',
+          },
+        );
+
+        testSql(
+          {
+            // Single string value in a JSONB array column should be properly quoted
+            jsonbAttr: { [Op.contains]: 'singleValue' },
+          },
+          {
+            postgres: `"jsonbAttr" @> '"singleValue"'::jsonb`,
+          },
+        );
+
+        testSql(
+          {
+            // Single numeric value in a JSONB array column should be properly quoted
+            jsonbAttr: { [Op.contains]: 5 },
+          },
+          {
+            postgres: `"jsonbAttr" @> '5'::jsonb`,
+          },
+        );
+
+        testSql(
+          {
+            // Single null value in a JSONB array column
+            jsonbAttr: { [Op.contains]: null },
+          },
+          {
+            postgres: `"jsonbAttr" @> 'null'::jsonb`,
           },
         );
 

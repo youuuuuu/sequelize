@@ -168,7 +168,7 @@ describe('DataTypes.ARRAY', () => {
           ),
           {
             postgres:
-              'ARRAY[\'{"some":"nested","more":{"nested":true},"answer":42}\',\'43\',\'"joe"\']::JSONB[]',
+              `ARRAY['{"some":"nested","more":{"nested":true},"answer":42}'::jsonb,'43'::jsonb,'"joe"'::jsonb]::JSONB[]`,
           },
         );
       });

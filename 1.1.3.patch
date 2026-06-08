@@ -1,0 +1,241 @@
+diff --git a/packages/core/src/operators.ts b/packages/core/src/operators.ts
+index e99009611..c59baaa99 100644
+--- a/packages/core/src/operators.ts
++++ b/packages/core/src/operators.ts
+@@ -101,8 +101,9 @@ export interface OpTypes {
+    */
+   readonly contained: unique symbol;
+   /**
+-   * Operator @> (PG array contains operator)
++   * Operator @> (PG range/array/JSONB contains operator)
+    *
++   * For ranges:
+    * ```js
+    * [Op.contains]: [1, 2]
+    * ```
+@@ -110,6 +111,19 @@ export interface OpTypes {
+    * ```sql
+    * @> [1, 2)
+    * ```
++   *
++   * For JSONB array columns:
++   * ```js
++   * [Op.contains]: 'value'
++   * // or for multiple values
++   * [Op.contains]: ['value1', 'value2']
++   * ```
++   * In SQL
++   * ```sql
++   * @> '"value"'::jsonb
++   * -- or
++   * @> '["value1","value2"]'::jsonb
++   * ```
+    */
+   readonly contains: unique symbol;
+   /**
+diff --git a/packages/core/test/unit/data-types/arrays.test.ts b/packages/core/test/unit/data-types/arrays.test.ts
+index dcddaefc1..b7f767942 100644
+--- a/packages/core/test/unit/data-types/arrays.test.ts
++++ b/packages/core/test/unit/data-types/arrays.test.ts
+@@ -168,7 +168,7 @@ describe('DataTypes.ARRAY', () => {
+           ),
+           {
+             postgres:
+-              'ARRAY[\'{"some":"nested","more":{"nested":true},"answer":42}\',\'43\',\'"joe"\']::JSONB[]',
++              `ARRAY['{"some":"nested","more":{"nested":true},"answer":42}'::jsonb,'43'::jsonb,'"joe"'::jsonb]::JSONB[]`,
+           },
+         );
+       });
+diff --git a/packages/core/test/unit/sql/where.test.ts b/packages/core/test/unit/sql/where.test.ts
+index a7a2ac84f..15feef5bd 100644
+--- a/packages/core/test/unit/sql/where.test.ts
++++ b/packages/core/test/unit/sql/where.test.ts
+@@ -3461,7 +3461,7 @@ Caused by: "undefined" cannot be escaped`),
+             },
+           },
+           {
+-            postgres: `"User"."jsonbAttr"#>ARRAY['nested','attribute']::VARCHAR(255)[] = '"value"'`,
++            postgres: `"User"."jsonbAttr"#>ARRAY['nested','attribute']::VARCHAR(255)[] = '"value"'::jsonb`,
+           },
+           {
+             mainAlias: 'User',
+@@ -3477,7 +3477,7 @@ Caused by: "undefined" cannot be escaped`),
+             },
+           },
+           {
+-            postgres: `"jsonbAttr"->'nested' IN ('1', '2')`,
++            postgres: `"jsonbAttr"->'nested' IN ('1'::jsonb, '2'::jsonb)`,
+           },
+         );
+ 
+@@ -3488,7 +3488,7 @@ Caused by: "undefined" cannot be escaped`),
+             },
+           },
+           {
+-            postgres: `"jsonbAttr"#>ARRAY['nested','attribute']::VARCHAR(255)[] IN ('3', '7')`,
++            postgres: `"jsonbAttr"#>ARRAY['nested','attribute']::VARCHAR(255)[] IN ('3'::jsonb, '7'::jsonb)`,
+           },
+         );
+ 
+@@ -3501,7 +3501,7 @@ Caused by: "undefined" cannot be escaped`),
+             },
+           },
+           {
+-            postgres: `"jsonbAttr"->'nested' BETWEEN '1' AND '2'`,
++            postgres: `"jsonbAttr"->'nested' BETWEEN '1'::jsonb AND '2'::jsonb`,
+           },
+         );
+ 
+@@ -3513,7 +3513,7 @@ Caused by: "undefined" cannot be escaped`),
+             },
+           },
+           {
+-            postgres: `"jsonbAttr"->'price' = '5' AND "jsonbAttr"->'name' = '"Product"'`,
++            postgres: `"jsonbAttr"->'price' = '5'::jsonb AND "jsonbAttr"->'name' = '"Product"'::jsonb`,
+           },
+         );
+ 
+@@ -3529,7 +3529,7 @@ Caused by: "undefined" cannot be escaped`),
+             },
+           },
+           {
+-            postgres: `"User"."jsonbAttr"#>ARRAY['name','last']::VARCHAR(255)[] = '"Simpson"' AND "User"."jsonbAttr"->'employment' != '"None"'`,
++            postgres: `"User"."jsonbAttr"#>ARRAY['name','last']::VARCHAR(255)[] = '"Simpson"'::jsonb AND "User"."jsonbAttr"->'employment' != '"None"'::jsonb`,
+           },
+           {
+             mainAlias: 'User',
+@@ -3549,7 +3549,7 @@ Caused by: "undefined" cannot be escaped`),
+             },
+           },
+           {
+-            postgres: `"jsonbAttr"#>ARRAY['nested','attribute']::VARCHAR(255)[] > ${queryGen.escape(jsonDt)}`,
++            postgres: `"jsonbAttr"#>ARRAY['nested','attribute']::VARCHAR(255)[] > ${queryGen.escape(jsonDt, { type: DataTypes.JSONB })}`,
+           },
+         );
+ 
+@@ -3562,7 +3562,7 @@ Caused by: "undefined" cannot be escaped`),
+             },
+           },
+           {
+-            postgres: `"jsonbAttr"#>ARRAY['nested','attribute']::VARCHAR(255)[] = 'true'`,
++            postgres: `"jsonbAttr"#>ARRAY['nested','attribute']::VARCHAR(255)[] = 'true'::jsonb`,
+           },
+         );
+ 
+@@ -3574,6 +3574,7 @@ Caused by: "undefined" cannot be escaped`),
+           },
+           {
+             default: `[jsonbAttr] @> '{"company":"Magnafone"}'`,
++            postgres: '"jsonbAttr" @> \'{"company":"Magnafone"}\'::jsonb',
+           },
+         );
+ 
+@@ -3582,7 +3583,7 @@ Caused by: "undefined" cannot be escaped`),
+             jsonbTypeLiteralAttr: { [Op.contains]: { foo: 'bar' } },
+           },
+           {
+-            postgres: '"jsonbTypeLiteralAttr" @> \'{"foo":"bar"}\'',
++            postgres: '"jsonbTypeLiteralAttr" @> \'{"foo":"bar"}\'::jsonb',
+           },
+         );
+ 
+@@ -3592,7 +3593,7 @@ Caused by: "undefined" cannot be escaped`),
+             jsonbTypeLiteralAttr: { [Op.contains]: { bad: 'bad' } },
+           },
+           {
+-            postgres: '"jsonbTypeLiteralAttr" @> \'{"bad":"bad"}\'',
++            postgres: '"jsonbTypeLiteralAttr" @> \'{"bad":"bad"}\'::jsonb',
+           },
+         );
+ 
+@@ -3601,7 +3602,7 @@ Caused by: "undefined" cannot be escaped`),
+             jsonbInterfaceAttr: { [Op.contains]: { foo: 'bar' } },
+           },
+           {
+-            postgres: '"jsonbInterfaceAttr" @> \'{"foo":"bar"}\'',
++            postgres: '"jsonbInterfaceAttr" @> \'{"foo":"bar"}\'::jsonb',
+           },
+         );
+ 
+@@ -3611,7 +3612,37 @@ Caused by: "undefined" cannot be escaped`),
+             jsonbInterfaceAttr: { [Op.contains]: { bad: 'bad' } },
+           },
+           {
+-            postgres: '"jsonbInterfaceAttr" @> \'{"bad":"bad"}\'',
++            postgres: '"jsonbInterfaceAttr" @> \'{"bad":"bad"}\'::jsonb',
++          },
++        );
++
++        testSql(
++          {
++            // Single string value in a JSONB array column should be properly quoted
++            jsonbAttr: { [Op.contains]: 'singleValue' },
++          },
++          {
++            postgres: `"jsonbAttr" @> '"singleValue"'::jsonb`,
++          },
++        );
++
++        testSql(
++          {
++            // Single numeric value in a JSONB array column should be properly quoted
++            jsonbAttr: { [Op.contains]: 5 },
++          },
++          {
++            postgres: `"jsonbAttr" @> '5'::jsonb`,
++          },
++        );
++
++        testSql(
++          {
++            // Single null value in a JSONB array column
++            jsonbAttr: { [Op.contains]: null },
++          },
++          {
++            postgres: `"jsonbAttr" @> 'null'::jsonb`,
+           },
+         );
+ 
+diff --git a/packages/postgres/src/_internal/data-types-overrides.ts b/packages/postgres/src/_internal/data-types-overrides.ts
+index da82c5b5c..e07b3cd21 100644
+--- a/packages/postgres/src/_internal/data-types-overrides.ts
++++ b/packages/postgres/src/_internal/data-types-overrides.ts
+@@ -406,6 +406,20 @@ export class ARRAY<T extends BaseTypes.AbstractDataType<any>> extends BaseTypes.
+   }
+ }
+ 
++export class JSONB extends BaseTypes.JSONB {
++  escape(value: any): string {
++    const jsonString = this.toBindableValue(value);
++
++    return `${this._getDialect().escapeString(jsonString)}::jsonb`;
++  }
++
++  getBindParamSql(value: any, options: BindParamOptions): string {
++    const jsonString = this.toBindableValue(value);
++
++    return `${options.bindParam(jsonString)}::jsonb`;
++  }
++}
++
+ export class ENUM<Members extends string> extends BaseTypes.ENUM<Members> {
+   override toSql(): string {
+     const context = this.usageContext;
+diff --git a/packages/postgres/src/query-generator.js b/packages/postgres/src/query-generator.js
+index 600e43a3a..e3f990745 100644
+--- a/packages/postgres/src/query-generator.js
++++ b/packages/postgres/src/query-generator.js
+@@ -657,4 +657,13 @@ export class PostgresQueryGenerator extends PostgresQueryGeneratorTypeScript {
+ 
+     return identifier;
+   }
++
++  _whereJsonContains(columnName, value) {
++    const columnSql = this.quoteIdentifier(columnName);
++    const escapedValue = this.escape(value, {
++      type: DataTypes.JSONB,
++    });
++
++    return `${columnSql} @> ${escapedValue}::jsonb`;
++  }
+ }

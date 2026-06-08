@@ -101,14 +101,28 @@ export interface OpTypes {
    */
   readonly contained: unique symbol;
   /**
-   * Operator @> (PG array contains operator)
+   * Operator @> (PG range/array/JSONB contains operator)
    *
+   * For ranges:
    * ```js
    * [Op.contains]: [1, 2]
    * ```
    * In SQL
    * ```sql
    * @> [1, 2)
+   * ```
+   *
+   * For JSONB array columns:
+   * ```js
+   * [Op.contains]: 'value'
+   * // or for multiple values
+   * [Op.contains]: ['value1', 'value2']
+   * ```
+   * In SQL
+   * ```sql
+   * @> '"value"'::jsonb
+   * -- or
+   * @> '["value1","value2"]'::jsonb
    * ```
    */
   readonly contains: unique symbol;
