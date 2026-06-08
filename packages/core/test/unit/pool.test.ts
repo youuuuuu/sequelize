@@ -80,7 +80,7 @@ describe('sequelize.pool', () => {
 
       const typedSequelize = sequelize2 as Sequelize<PostgresDialect>;
 
-      typedSequelize.hooks.addListener('beforeConnect', config => {
+      typedSequelize.hooks.addListener('beforeConnect', (config: Record<string, unknown>) => {
         config.user = user;
         config.password = password;
       });
@@ -106,7 +106,6 @@ describe('sequelize.pool', () => {
     });
 
     it('round robins calls to the read pool', async () => {
-      // TODO https://github.com/sequelize/sequelize/issues/15150 - use pool ID instead
       const replica1Overrides: DialectConnectionConfigs = {
         postgres: {
           host: 'replica1',
@@ -264,6 +263,117 @@ describe('sequelize.pool', () => {
       expect(connectStub).to.have.been.calledOnce;
       const calls = connectStub.getCalls();
       expect(calls[0].args[0]).to.deep.contain(writeOverride[dialectName]);
+    });
+
+    it('destroys unhealthy connections and reacquires a healthy one when acquire health checks are enabled', async () => {
+      const unhealthyConnection = {};
+      const healthyConnection = {};
+      const sequelize3 = createSequelizeInstance({
+        databaseVersion: sequelize.dialect.minimumDatabaseVersion,
+        pool: {
+          healthCheck: {
+            acquire: {
+              idleTime: 0,
+              maxRetries: 2,
+            },
+          },
+        },
+      });
+
+      const connectionManager = sequelize3.dialect.connectionManager;
+      const connectStub = sandbox.stub(connectionManager, 'connect');
+      connectStub.onFirstCall().resolves(unhealthyConnection);
+      connectStub.onSecondCall().resolves(healthyConnection);
+      const disconnectStub = sandbox.stub(connectionManager, 'disconnect').resolves();
+      sandbox.stub(sequelize3, 'query').callsFake(async (_sql: string, options?: { connection?: unknown }) => {
+        if (options?.connection === unhealthyConnection) {
+          throw new Error('ECONNRESET');
+        }
+
+        return [{}];
+      });
+
+      const connection = await sequelize3.pool.acquire();
+
+      expect(connection).to.equal(healthyConnection);
+      expect(disconnectStub).to.have.been.calledOnceWith(unhealthyConnection);
+    });
+
+    it('only runs acquire health checks after the configured idle time', async () => {
+      const clock = sandbox.useFakeTimers();
+      const connection = {};
+      const sequelize3 = createSequelizeInstance({
+        databaseVersion: sequelize.dialect.minimumDatabaseVersion,
+        pool: {
+          healthCheck: {
+            acquire: {
+              idleTime: 1000,
+            },
+          },
+        },
+      });
+
+      const connectionManager = sequelize3.dialect.connectionManager;
+      sandbox.stub(connectionManager, 'connect').resolves(connection);
+      sandbox.stub(connectionManager, 'disconnect').resolves();
+      const queryStub = sandbox.stub(sequelize3, 'query').resolves([{}]);
+
+      const firstConnection = await sequelize3.pool.acquire();
+      expect(firstConnection).to.equal(connection);
+      expect(queryStub).to.not.have.been.called;
+
+      sequelize3.pool.release(firstConnection);
+      await clock.tickAsync(500);
+
+      const secondConnection = await sequelize3.pool.acquire();
+      expect(secondConnection).to.equal(connection);
+      expect(queryStub).to.not.have.been.called;
+
+      sequelize3.pool.release(secondConnection);
+      await clock.tickAsync(1000);
+
+      const thirdConnection = await sequelize3.pool.acquire();
+      expect(thirdConnection).to.equal(connection);
+      expect(queryStub).to.have.been.calledOnce;
+    });
+  });
+
+  describe('idle health checks', () => {
+    let sandbox: SinonSandbox;
+
+    beforeEach(() => {
+      sandbox = sinon.createSandbox();
+    });
+
+    afterEach(() => {
+      sandbox.restore();
+    });
+
+    it('destroys unhealthy idle connections', async () => {
+      const clock = sandbox.useFakeTimers();
+      const connection = {};
+      const sequelize2 = createSequelizeInstance({
+        databaseVersion: sequelize.dialect.minimumDatabaseVersion,
+        pool: {
+          healthCheck: {
+            idle: {
+              interval: 1000,
+            },
+          },
+        },
+      });
+
+      const connectionManager = sequelize2.dialect.connectionManager;
+      sandbox.stub(connectionManager, 'connect').resolves(connection);
+      const disconnectStub = sandbox.stub(connectionManager, 'disconnect').resolves();
+      sandbox.stub(sequelize2, 'query').rejects(new Error('socket hang up'));
+
+      const pooledConnection = await sequelize2.pool.acquire();
+      sequelize2.pool.release(pooledConnection);
+
+      await clock.tickAsync(1000);
+
+      expect(disconnectStub).to.have.been.calledOnceWith(connection);
     });
   });
 

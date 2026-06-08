@@ -1,10 +1,13 @@
 import type { PartialOrUndefined, StrictRequiredBy } from '@sequelize/utils';
-import type { Connection } from './abstract-dialect/connection-manager.js';
 import type {
   AbstractDialect,
   ConnectionOptions,
   DialectOptions,
 } from './abstract-dialect/dialect.js';
+import type {
+  Connection,
+  ConnectionHealthCheckOptions,
+} from './abstract-dialect/connection-manager.js';
 import type { ReplicationPoolOptions } from './abstract-dialect/replication-pool.js';
 import type {
   EphemeralSequelizeOptions,
@@ -25,6 +28,8 @@ export interface PoolOptions<Dialect extends AbstractDialect>
    * If provided, this overrides the default connection validation built in to sequelize.
    */
   validate?: ((connection?: Connection<Dialect>) => boolean) | undefined;
+
+  healthCheck?: ConnectionHealthCheckOptions | undefined;
 }
 
 /**

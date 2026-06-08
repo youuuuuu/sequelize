@@ -67,6 +67,12 @@ import { Validator } from './utils/validator-extras';
  * This is the main class, the entry point to sequelize.
  */
 export class Sequelize extends SequelizeTypeScript {
+  constructor(options) {
+    super(options);
+
+    this.dialect.connectionManager.installPoolHealthChecks();
+  }
+
   /**
    * Returns the specified dialect.
    *
