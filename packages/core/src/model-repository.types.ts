@@ -1,7 +1,18 @@
 import type { StrictRequiredBy } from '@sequelize/utils';
 import type { QiBulkDeleteOptions } from './abstract-dialect/query-interface.types.js';
+import type { Col } from './expression-builders/col.js';
+import type { Literal } from './expression-builders/literal.js';
 import type { NewHookable } from './hooks.js';
-import type { Attributes, Model } from './model.js';
+import type { WhereOptions } from './index.js';
+import type {
+  Attributes,
+  CreationAttributes,
+  Hookable,
+  Logging,
+  Model,
+  SearchPathable,
+  Transactionable,
+} from './model.js';
 
 export enum ManualOnDelete {
   /**
@@ -18,8 +29,7 @@ export enum ManualOnDelete {
 
   /**
    * Pre-deletes every cascading model in JS before deleting the current instance.
-   * Useful if you need to trigger the JS hooks for cascading deletes,
-   * or if foreign key constraints are disabled in the database.
+   * Useful if you need to trigger the JS delete hooks for the cascading models.
    *
    * This is the least efficient option.
    */
@@ -58,3 +68,50 @@ export interface BulkDestroyOptions<TModel extends Model>
   extends NewHookable<'_UNSTABLE_beforeBulkDestroy' | '_UNSTABLE_afterBulkDestroy'>,
     StrictRequiredBy<QiBulkDeleteOptions<Attributes<TModel>>, 'where'>,
     CommonDestroyOptions {}
+
+/**
+ * Options for ModelRepository.bulkUpsert method
+ */
+export interface BulkUpsertOptions<TModel extends Model>
+  extends Logging,
+    Transactionable,
+    Hookable,
+    SearchPathable,
+    NewHookable<'_UNSTABLE_beforeBulkUpsert' | '_UNSTABLE_afterBulkUpsert'> {
+  /**
+   * Fields to insert (defaults to all fields)
+   */
+  fields?: Array<keyof CreationAttributes<TModel>>;
+
+  /**
+   * Should each row be subject to validation before it is inserted.
+   * The whole insert will fail if one row fails validation.
+   *
+   * @default false
+   */
+  validate?: boolean;
+
+  /**
+   * Fields to update if row key already exists (on duplicate key update)? (only supported by MySQL,
+   * MariaDB, SQLite >= 3.24.0 & Postgres >= 9.5).
+   */
+  updateOnDuplicate?: Array<keyof Attributes<TModel>>;
+
+  /**
+   * Return all columns or only the specified columns for the affected rows (only for postgres)
+   */
+  returning?: boolean | Array<keyof Attributes<TModel> | Literal | Col>;
+
+  /**
+   * An optional parameter to specify a where clause for partial unique indexes
+   * (note: `ON CONFLICT WHERE` not `ON CONFLICT DO UPDATE WHERE`).
+   * Only supported in Postgres >= 9.5 and sqlite >= 9.5
+   */
+  conflictWhere?: WhereOptions<Attributes<TModel>>;
+
+  /**
+   * Optional override for the conflict fields in the ON CONFLICT part of the query.
+   * Only supported in Postgres >= 9.5 and SQLite >= 3.24.0
+   */
+  conflictAttributes?: Array<keyof Attributes<TModel>>;
+}

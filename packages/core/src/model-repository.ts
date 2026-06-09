@@ -14,24 +14,16 @@ import {
 } from './model-internals.js';
 import type {
   BulkDestroyOptions,
+  BulkUpsertOptions,
   CommonDestroyOptions,
   DestroyManyOptions,
 } from './model-repository.types.js';
 import { ManualOnDelete } from './model-repository.types.js';
-import type { Model, Transactionable } from './model.js';
+import type { CreationAttributes, Model, Transactionable } from './model.js';
 import { Op } from './operators.js';
+import { mapValueFieldNames } from './utils/format.js';
+import { getObjectFromMap } from './utils/object.js';
 
-/**
- * The goal of this class is to become the new home of all the static methods that are currently present on the Model class,
- * as a way to enable a true Repository Mode for Sequelize.
- *
- * Currently, this class is not usable as a repository (due to having a dependency on ModelStatic), but as we migrate all of
- * Model to this class, we will be able to remove the dependency on ModelStatic, and make this class usable as a repository.
- *
- * See https://github.com/sequelize/sequelize/issues/15389 for more details.
- *
- * Unlike {@link ModelDefinition}, it's possible to have multiple different repositories for the same model (as users can provide their own implementation).
- */
 export class ModelRepository<M extends Model = Model> {
   readonly #modelDefinition: ModelDefinition<M>;
 
@@ -69,7 +61,6 @@ export class ModelRepository<M extends Model = Model> {
     if (mayRunHook('beforeDestroyMany', options.noHooks)) {
       await this.#modelDefinition.hooks.runAsync('beforeDestroyMany', instances, options);
 
-      // in case the beforeDestroyMany hook removed all instances.
       if (instances.length === 0) {
         return 0;
       }
@@ -109,7 +100,6 @@ export class ModelRepository<M extends Model = Model> {
 
     const isSoftDelete = !options.hardDelete && this.#modelDefinition.isParanoid();
     if (isSoftDelete) {
-      // TODO: implement once updateMany is implemented - https://github.com/sequelize/sequelize/issues/4501
       throw new Error('ModelRepository#_UNSTABLE_destroy does not support paranoid deletion yet.');
     }
 
@@ -125,9 +115,6 @@ export class ModelRepository<M extends Model = Model> {
       where = { [primaryKey]: values };
     } else {
       where = {
-        // Ideally, we'd use tuple comparison here, but that's not supported by Sequelize yet.
-        // It would look like this:
-        // WHERE (id1, id2) IN ((1, 2), (3, 4))
         [Op.or]: instances.map(instance => getModelPkWhere(instance, true)!),
       };
     }
@@ -138,7 +125,6 @@ export class ModelRepository<M extends Model = Model> {
       where,
     };
 
-    // DestroyManyOptions-specific options.
     delete bulkDeleteOptions.hardDelete;
     delete bulkDeleteOptions.noHooks;
 
@@ -151,8 +137,6 @@ export class ModelRepository<M extends Model = Model> {
 
     assertHasWhereOptions(options);
     setTransactionFromCls(options, this.#sequelize);
-
-    // TODO: support "scope" option + default scope
 
     const modelDefinition = this.#modelDefinition;
 
@@ -188,9 +172,6 @@ export class ModelRepository<M extends Model = Model> {
     const modelDefinition = this.#modelDefinition;
 
     if (cascadingAssociations.length > 0) {
-      // TODO: if we know this is the last cascade,
-      //  we can avoid the fetch and call bulkDestroy directly instead of destroyMany.
-      // TODO: only fetch the attributes that are referenced by a foreign key, not all attributes.
       const instances: M[] = await modelDefinition.model.findAll(options);
 
       await this.#manuallyCascadeDestroy(instances, cascadingAssociations, options);
@@ -201,21 +182,6 @@ export class ModelRepository<M extends Model = Model> {
       throw new Error(
         'ModelRepository#_UNSTABLE_bulkDestroy does not support paranoid deletion yet.',
       );
-      // const deletedAtAttribute = modelDefinition.attributes.getOrThrow(deletedAtAttributeName);
-
-      // return this.#queryInterface.bulkUpdate(
-      //   modelDefinition,
-      //   pojo({
-      //     [deletedAtAttributeName]: new Date(),
-      //   }),
-      //   and(
-      //     {
-      //       [deletedAtAttributeName]: deletedAtAttribute.defaultValue ?? null,
-      //     },
-      //     options.where,
-      //   ),
-      //   options,
-      // );
     }
 
     return this.#queryInterface.bulkDelete(this.#modelDefinition, options);
@@ -266,11 +232,6 @@ export class ModelRepository<M extends Model = Model> {
 
         switch (foreignKey.onDelete) {
           case 'CASCADE': {
-            // Because the cascade can lead to further cascades,
-            // we need to fetch the instances first to recursively destroy them.
-            // TODO: if we know this is the last cascade,
-            //  we can avoid the fetch and call bulkDestroy directly instead of destroyMany.
-            // TODO: only fetch the attributes that are referenced by a foreign key, not all attributes.
             const associatedInstances = await source.model.findAll({
               transaction: options.transaction,
               connection: options.connection,
@@ -296,12 +257,10 @@ This would lead to an active record being associated with a deleted record.`);
           }
 
           case 'SET NULL': {
-            // TODO: implement once bulkUpdate is implemented
             throw new Error('Manual cascades do not support SET NULL yet.');
           }
 
           case 'SET DEFAULT': {
-            // TODO: implement once bulkUpdate is implemented
             throw new Error('Manual cascades do not support SET DEFAULT yet.');
           }
 
@@ -312,13 +271,130 @@ This would lead to an active record being associated with a deleted record.`);
     );
   }
 
-  // async save(instances: M[] | M): Promise<void> {}
-  // async updateOne(instance: M, values: object, options: unknown): Promise<M> {}
-  // async updateMany(data: Array<{ instance: M, values: object }>, options: unknown): Promise<M> {}
-  // async updateMany(data: Array<{ where: object, values: object }>, options: unknown): Promise<M> {}
-  // async restore(instances: M[] | M, options: unknown): Promise<number> {}
-  // async bulkUpdate(options: unknown): Promise<M> {}
-  // async bulkRestore(options: unknown): Promise<M> {}
+  async _UNSTABLE_bulkUpsert(
+    records: ReadonlyArray<CreationAttributes<M>>,
+    options: BulkUpsertOptions<M> = EMPTY_OBJECT,
+  ): Promise<M[]> {
+    if (records.length === 0) {
+      return [];
+    }
+
+    options = shallowClonePojo(options);
+    setTransactionFromCls(options, this.#sequelize);
+
+    const modelDefinition = this.#modelDefinition;
+    const dialect = this.#sequelize.dialect.name;
+
+    if (
+      options.updateOnDuplicate &&
+      !this.#sequelize.dialect.supports.inserts.updateOnDuplicate
+    ) {
+      throw new Error(`${dialect} does not support the updateOnDuplicate option.`);
+    }
+
+    const instances: M[] = records.map(values =>
+      modelDefinition.model.build(values, { isNewRecord: true }),
+    );
+
+    if (mayRunHook('_UNSTABLE_beforeBulkUpsert', options.noHooks)) {
+      await modelDefinition.hooks.runAsync('_UNSTABLE_beforeBulkUpsert', instances, options as any);
+    }
+
+    const now = new Date();
+    const createdAtAttr = modelDefinition.timestampAttributeNames.createdAt;
+    const updatedAtAttr = modelDefinition.timestampAttributeNames.updatedAt;
+
+    const fields: string[] = (options.fields as string[]) ?? Array.from(modelDefinition.attributes.keys());
+
+    if (options.updateOnDuplicate !== undefined) {
+      if (Array.isArray(options.updateOnDuplicate) && options.updateOnDuplicate.length > 0) {
+        const updateOnDuplicateSet = new Set(modelDefinition.physicalAttributes.keys());
+        options.updateOnDuplicate = options.updateOnDuplicate.filter(field =>
+          updateOnDuplicateSet.has(field as string) && field !== createdAtAttr,
+        ) as Array<keyof CreationAttributes<M>>;
+      } else {
+        throw new Error('updateOnDuplicate option only supports non-empty array.');
+      }
+    }
+
+    if (options.validate) {
+      const errors: Error[] = [];
+
+      await Promise.all(
+        instances.map(async instance => {
+          try {
+            await instance.validate({ hooks: options.noHooks ? false : true });
+          } catch (error) {
+            errors.push(error as Error);
+          }
+        }),
+      );
+
+      if (errors.length > 0) {
+        throw new AggregateError(errors);
+      }
+    }
+
+    if (createdAtAttr && !fields.includes(createdAtAttr)) {
+      fields.push(createdAtAttr);
+    }
+
+    if (updatedAtAttr && !fields.includes(updatedAtAttr)) {
+      fields.push(updatedAtAttr);
+    }
+
+    const fieldMappedAttributes = getObjectFromMap(modelDefinition.attributes);
+    const recordsForInsert = instances.map(instance => {
+      const values = instance.dataValues;
+
+      if (createdAtAttr && !values[createdAtAttr]) {
+        values[createdAtAttr] = now;
+      }
+
+      if (updatedAtAttr && !values[updatedAtAttr]) {
+        values[updatedAtAttr] = now;
+      }
+
+      const out = mapValueFieldNames(values, fields, modelDefinition.model);
+      for (const key of modelDefinition.virtualAttributeNames) {
+        delete out[key];
+      }
+
+      return out;
+    });
+
+    const bulkInsertOptions: Record<string, unknown> = {
+      ...options,
+      model: modelDefinition.model,
+    };
+
+    const results = await this.#queryInterface.bulkInsert(
+      modelDefinition.table,
+      recordsForInsert,
+      bulkInsertOptions as any,
+      fieldMappedAttributes as any,
+    );
+
+    if (options.returning !== false && Array.isArray(results)) {
+      for (let i = 0; i < instances.length; i++) {
+        const result = results[i];
+        if (result) {
+          instances[i].set(result, { raw: true });
+          instances[i].isNewRecord = false;
+        }
+      }
+    } else {
+      for (const instance of instances) {
+        instance.isNewRecord = false;
+      }
+    }
+
+    if (mayRunHook('_UNSTABLE_afterBulkUpsert', options.noHooks)) {
+      await modelDefinition.hooks.runAsync('_UNSTABLE_afterBulkUpsert', instances, options as any, results);
+    }
+
+    return instances;
+  }
 }
 
 const modelRepositories = new WeakMap<ModelDefinition, ModelRepository>();

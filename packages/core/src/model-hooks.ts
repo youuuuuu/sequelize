@@ -7,7 +7,7 @@ import type {
 import type { AsyncHookReturn } from './hooks.js';
 import { HookHandlerBuilder } from './hooks.js';
 import type { ValidationOptions } from './instance-validator.js';
-import type { DestroyManyOptions } from './model-repository.types.js';
+import type { BulkUpsertOptions, DestroyManyOptions } from './model-repository.types.js';
 import type {
   BulkCreateOptions,
   CountOptions,
@@ -72,6 +72,15 @@ export interface ModelHooks<M extends Model = Model, TAttributes = any> {
   afterBulkRestore(options: RestoreOptions<TAttributes>): AsyncHookReturn;
   beforeBulkUpdate(options: UpdateOptions<TAttributes>): AsyncHookReturn;
   afterBulkUpdate(options: UpdateOptions<TAttributes>): AsyncHookReturn;
+  _UNSTABLE_beforeBulkUpsert(
+    instances: M[],
+    options: BulkUpsertOptions<M>,
+  ): AsyncHookReturn;
+  _UNSTABLE_afterBulkUpsert(
+    instances: readonly M[],
+    options: BulkUpsertOptions<M>,
+    result: unknown,
+  ): AsyncHookReturn;
 
   /**
    * A hook that is run at the start of {@link Model.count}
@@ -158,6 +167,8 @@ export const validModelHooks: Array<keyof ModelHooks> = [
   'afterBulkRestore',
   'beforeBulkUpdate',
   'afterBulkUpdate',
+  '_UNSTABLE_beforeBulkUpsert',
+  '_UNSTABLE_afterBulkUpsert',
   'beforeCount',
   'beforeFind',
   'beforeFindAfterExpandIncludeAll',
