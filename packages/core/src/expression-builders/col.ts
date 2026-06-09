@@ -1,4 +1,7 @@
 import { BaseSqlExpression, SQL_IDENTIFIER } from './base-sql-expression.js';
+import { parseAttributeSyntax } from '../utils/attribute-syntax.js';
+import { Attribute } from './attribute.js';
+import { JsonPath } from './json-path.js';
 
 /**
  * Do not use me directly. Use {@link sql.col}
@@ -8,11 +11,40 @@ export class Col extends BaseSqlExpression {
 
   readonly identifiers: string[];
 
+  /**
+   * If this Col represents a JSON path expression (e.g. col('data.name') or col('data[0].key')),
+   * this property holds the parsed JSON path segments.
+   * Otherwise, it is undefined.
+   */
+  readonly jsonPath: ReadonlyArray<string | number> | undefined;
+
+  /**
+   * If this Col represents a JSON path expression, this is the base column name
+   * (e.g. 'data' from col('data.name')).
+   * Otherwise, it is undefined.
+   */
+  readonly baseIdentifier: string | undefined;
+
   constructor(...identifiers: string[]) {
     super();
 
     // TODO: verify whether the "more than one identifier" case is still needed
     this.identifiers = identifiers;
+
+    if (identifiers.length === 1) {
+      const identifier = identifiers[0];
+      if (identifier.includes('.') || identifier.includes('[')) {
+        try {
+          const parsed = parseAttributeSyntax(identifier);
+          if (parsed instanceof JsonPath && parsed.expression instanceof Attribute) {
+            this.jsonPath = parsed.path;
+            this.baseIdentifier = parsed.expression.attributeName;
+          }
+        } catch {
+          // If parsing fails, treat as a regular column name without JSON path
+        }
+      }
+    }
   }
 }
 

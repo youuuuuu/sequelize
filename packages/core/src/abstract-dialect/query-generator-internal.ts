@@ -1,13 +1,13 @@
 import { EMPTY_ARRAY } from '@sequelize/utils';
 import { Deferrable } from '../deferrable.js';
 import type { AssociationPath } from '../expression-builders/association-path.js';
-import type { Attribute } from '../expression-builders/attribute.js';
+import { Attribute } from '../expression-builders/attribute.js';
 import { BaseSqlExpression } from '../expression-builders/base-sql-expression.js';
 import type { Cast } from '../expression-builders/cast.js';
 import type { Col } from '../expression-builders/col.js';
 import type { DialectAwareFn } from '../expression-builders/dialect-aware-fn.js';
 import type { Fn } from '../expression-builders/fn.js';
-import type { JsonPath } from '../expression-builders/json-path.js';
+import { JsonPath } from '../expression-builders/json-path.js';
 import type { Literal } from '../expression-builders/literal.js';
 import type { Sequelize } from '../sequelize.js';
 import { extractModelDefinition } from '../utils/model-utils.js';
@@ -333,6 +333,13 @@ Only named replacements (:name) are allowed in literal() because we cannot guara
     // TODO: can this be removed?
     if (piece.identifiers.length === 1 && piece.identifiers[0].startsWith('*')) {
       return '*';
+    }
+
+    if (piece.jsonPath && piece.baseIdentifier) {
+      const attribute = new Attribute(piece.baseIdentifier);
+      const jsonPath = new JsonPath(attribute, piece.jsonPath);
+
+      return this.formatJsonPath(jsonPath, options);
     }
 
     // Weird legacy behavior

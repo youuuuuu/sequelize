@@ -903,6 +903,15 @@ export class WhereSqlBuilder {
     operand: Expression,
     pathSegments: ReadonlyArray<string | number>,
   ): Expression {
+    if (operand instanceof Col && operand.jsonPath && operand.baseIdentifier) {
+      const extractedPath = [...operand.jsonPath, ...pathSegments];
+      if (extractedPath.length === 0) {
+        return new Attribute(operand.baseIdentifier);
+      }
+
+      return new JsonPath(new Attribute(operand.baseIdentifier), extractedPath);
+    }
+
     if (pathSegments.length === 0) {
       return operand;
     }
@@ -951,6 +960,10 @@ export class WhereSqlBuilder {
 
     if (operand instanceof JsonPath) {
       // JsonPath can wrap Attributes
+      return this.#jsonType;
+    }
+
+    if (operand instanceof Col && operand.jsonPath) {
       return this.#jsonType;
     }
 
