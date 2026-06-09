@@ -825,7 +825,26 @@ export class WhereSqlBuilder {
       // nested JSON path
       if (typeof key === 'string') {
         // parse path segments & cast syntax
-        const parsedKey = parseNestedJsonKeySyntax(key);
+        const pathSegments: Array<string | number> = [];
+        const regex = /(?:^|\.)([^.\[\]:]+)|\[['"]?([^'"\[\]:]+)['"]?\]/g;
+        const cleanKey = key.replace(/(?:::|:)[^:.]+/g, '');
+        let match;
+        while ((match = regex.exec(cleanKey)) !== null) {
+          const segment = match[1] !== undefined ? match[1] : match[2];
+          pathSegments.push(/^\d+$/.test(segment) ? Number(segment) : segment);
+        }
+
+        const castsAndModifiers: Array<string | any> = [];
+        const castsMatch = key.match(/(?:::|:)[^:.]+/g);
+        if (castsMatch) {
+          for (const cast of castsMatch) {
+             if (cast.startsWith('::')) {
+                castsAndModifiers.push(cast.slice(2));
+             }
+          }
+        }
+
+        const parsedKey = { pathSegments, castsAndModifiers } as ParsedJsonPropertyKey;
 
         // optimization for common simple scenario (to skip replacing leftOperand on every iteration)
         if (parsedKey.castsAndModifiers.length === 0) {

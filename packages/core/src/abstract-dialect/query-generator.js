@@ -913,24 +913,38 @@ export class AbstractQueryGenerator extends AbstractQueryGeneratorTypeScript {
             } else if (previousModelDefinition.attributes.has(item)) {
               // convert the item attribute from its alias
               item = previousModelDefinition.attributes.get(item).columnName;
-            } else if (item.includes('.')) {
-              const itemSplit = item.split('.');
+            } else if (item.includes('.') || item.includes('[')) {
+              const pathSegments = [];
+              const regex = /(?:^|\.)([^.\[\]]+)|\[['"]?([^'"\[\]]+)['"]?\]/g;
+              let match;
+              while ((match = regex.exec(item)) !== null) {
+                const segment = match[1] !== undefined ? match[1] : match[2];
+                pathSegments.push(/^\d+$/.test(segment) ? Number(segment) : segment);
+              }
 
-              const jsonAttribute = previousModelDefinition.attributes.get(itemSplit[0]);
-              if (jsonAttribute.type instanceof DataTypes.JSON) {
-                // just quote identifiers for now
-                const identifier = this.quoteIdentifiers(
-                  `${previousModel.name}.${jsonAttribute.columnName}`,
-                );
+              if (pathSegments.length > 0) {
+                const jsonAttribute = previousModelDefinition.attributes.get(pathSegments[0]);
+                if (jsonAttribute && jsonAttribute.type instanceof DataTypes.JSON) {
+                  // just quote identifiers for now
+                  const identifier = this.quoteIdentifiers(
+                    `${previousModel.name}.${jsonAttribute.columnName}`,
+                  );
 
-                // get path
-                const path = itemSplit.slice(1);
+                  // get path
+                  const path = pathSegments.slice(1);
 
-                // extract path
-                item = this.jsonPathExtractionQuery(identifier, path);
+                  // extract path
+                  item = this.jsonPathExtractionQuery(identifier, path);
 
-                // literal because we don't want to append the model name when string
-                item = new Literal(item);
+                  // literal because we don't want to append the model name when string
+                  item = new Literal(item);
+                } else if (item.includes('.')) {
+                  // Handle associations correctly for non-JSON paths
+                  const itemSplit = item.split('.');
+                  if (previousModel.associations?.[itemSplit[0]]) {
+                    item = previousModel.associations[itemSplit[0]];
+                  }
+                }
               }
             }
           }

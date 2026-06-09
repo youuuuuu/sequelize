@@ -6,13 +6,24 @@ import { BaseSqlExpression, SQL_IDENTIFIER } from './base-sql-expression.js';
 export class Col extends BaseSqlExpression {
   declare protected readonly [SQL_IDENTIFIER]: 'col';
 
-  readonly identifiers: string[];
+  readonly identifiers: Array<string | number>;
 
   constructor(...identifiers: string[]) {
     super();
 
-    // TODO: verify whether the "more than one identifier" case is still needed
-    this.identifiers = identifiers;
+    // Parse JSON path expressions like 'data.nested[0].property'
+    if (identifiers.length === 1 && typeof identifiers[0] === 'string' && /[\.\[]/.test(identifiers[0])) {
+      const pathSegments: Array<string | number> = [];
+      const regex = /(?:^|\.)([^.\[\]]+)|\[['"]?([^'"\[\]]+)['"]?\]/g;
+      let match;
+      while ((match = regex.exec(identifiers[0])) !== null) {
+        const segment = match[1] !== undefined ? match[1] : match[2];
+        pathSegments.push(/^\d+$/.test(segment) ? Number(segment) : segment);
+      }
+      this.identifiers = pathSegments.length > 0 ? pathSegments : identifiers;
+    } else {
+      this.identifiers = identifiers;
+    }
   }
 }
 
