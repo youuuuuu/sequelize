@@ -331,6 +331,7 @@ If you really need to access the connection manager, access it through \`sequeli
   readonly models = new ModelSetView<Dialect>(this, this.#models);
   #isClosed: boolean = false;
   readonly pool: ReplicationPool<Connection<Dialect>, ConnectionOptions<Dialect>>;
+  #healthCheckTimer: ReturnType<typeof setInterval> | undefined;
 
   get modelManager(): never {
     throw new Error('Sequelize#modelManager was removed. Use Sequelize#models instead.');
@@ -699,7 +700,21 @@ Connection options can be used at the root of the option bag, in the "replicatio
         connection: Connection<Dialect>,
         acquireOptions: AcquireConnectionOptions,
       ) => {
-        return this.hooks.runAsync('afterPoolAcquire', connection, acquireOptions);
+        await this.hooks.runAsync('afterPoolAcquire', connection, acquireOptions);
+
+        const healthCheckOptions = options.pool?.healthCheck;
+        if (healthCheckOptions?.enabled) {
+          const mode = healthCheckOptions.mode ?? 'acquire';
+          if (mode === 'acquire' || mode === 'both') {
+            const isHealthy = await this.dialect.connectionManager.healthCheck(connection);
+            if (!isHealthy) {
+              await this.pool.destroy(connection);
+              throw new Error(
+                'Connection health check failed: the connection has been destroyed and a new one will be acquired.',
+              );
+            }
+          }
+        }
       },
       timeoutErrorClass: ConnectionAcquireTimeoutError,
       readConfig: this.options.replication.read,
@@ -710,8 +725,54 @@ Connection options can be used at the root of the option bag, in the "replicatio
       this.addModels(options.models);
     }
 
+    this.#setupHealthCheckTimer(options);
+
     // TODO: remove this cast once sequelize-typescript and sequelize have been fully merged
     Sequelize.hooks.runSync('afterInit', this as unknown as Sequelize);
+  }
+
+  #setupHealthCheckTimer(options: Options<Dialect>) {
+    const healthCheckOptions = options.pool?.healthCheck;
+    if (!healthCheckOptions?.enabled) {
+      return;
+    }
+
+    const mode = healthCheckOptions.mode ?? 'acquire';
+    if (mode !== 'idle' && mode !== 'both') {
+      return;
+    }
+
+    const interval = healthCheckOptions.idleCheckIntervalMs ?? 10_000;
+
+    this.#healthCheckTimer = setInterval(async () => {
+      if (this.#isClosed) {
+        return;
+      }
+
+      try {
+        const connection = await this.pool.acquire();
+        try {
+          const isHealthy = await this.dialect.connectionManager.healthCheck(connection);
+          if (!isHealthy) {
+            await this.pool.destroy(connection);
+          } else {
+            this.pool.release(connection);
+          }
+        } catch {
+          await this.pool.destroy(connection);
+        }
+      } catch {
+        // Failed to acquire a connection, the pool may be saturated or empty.
+        // This is normal and will be handled by the normal pool mechanisms.
+      }
+    }, interval);
+
+    // @ts-expect-error -- setInterval returns NodeJS.Timeout with .unref() at runtime (Node.js),
+    // but @types/node may not be available, causing TS to infer the return as `number`.
+    if (this.#healthCheckTimer?.unref) {
+      // @ts-expect-error -- see above
+      this.#healthCheckTimer.unref();
+    }
   }
 
   #databaseVersionPromise: Promise<void> | null = null;
@@ -756,6 +817,11 @@ Connection options can be used at the root of the option bag, in the "replicatio
    */
   async close() {
     this.#isClosed = true;
+
+    if (this.#healthCheckTimer) {
+      clearInterval(this.#healthCheckTimer);
+      this.#healthCheckTimer = undefined;
+    }
 
     await this.pool.destroyAllNow();
   }

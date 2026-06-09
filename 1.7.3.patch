@@ -1,0 +1,232 @@
+diff --git a/packages/core/src/abstract-dialect/connection-manager.ts b/packages/core/src/abstract-dialect/connection-manager.ts
+index af50bd460..47a51cc63 100644
+--- a/packages/core/src/abstract-dialect/connection-manager.ts
++++ b/packages/core/src/abstract-dialect/connection-manager.ts
+@@ -64,6 +64,52 @@ export class AbstractConnectionManager<
+     throw new Error(`validate not implemented in ${this.constructor.name}`);
+   }
+ 
++  /**
++   * Perform an active health check on a connection by executing a simple query.
++   *
++   * Unlike {@link validate}, which performs a synchronous local-state check,
++   * this method actively tests the connection by running a simple SQL query.
++   * This can detect broken connections caused by database server restarts or
++   * network interruptions that are not reflected in the driver's local state.
++   *
++   * @param connection - The connection to check.
++   * @returns `true` if the connection is healthy, `false` otherwise.
++   */
++  async healthCheck(connection: TConnection): Promise<boolean> {
++    const healthCheckQuery = this.#getHealthCheckQuery();
++
++    try {
++      await this.sequelize.queryRaw(healthCheckQuery, {
++        connection,
++        type: 'RAW',
++        raw: true,
++        logging: false,
++        retry: { max: 0 },
++      });
++
++      return true;
++    } catch {
++      return false;
++    }
++  }
++
++  #getHealthCheckQuery(): string {
++    const healthCheckOptions = this.sequelize.rawOptions?.pool?.healthCheck;
++    if (healthCheckOptions?.query) {
++      return healthCheckOptions.query;
++    }
++
++    const dialect = this.dialect;
++    const dummyTable = dialect.supports.select?.dummyTable;
++    if (dummyTable) {
++      const quotedTable = dialect.queryGenerator?.quoteIdentifier?.(dummyTable) ?? dummyTable;
++
++      return `SELECT 1 FROM ${quotedTable}`;
++    }
++
++    return 'SELECT 1';
++  }
++
+   async connect(_config: ConnectionOptions<Dialect>): Promise<TConnection> {
+     throw new Error(`connect not implemented in ${this.constructor.name}`);
+   }
+diff --git a/packages/core/src/sequelize-typescript.ts b/packages/core/src/sequelize-typescript.ts
+index 772569e23..bc63b100c 100644
+--- a/packages/core/src/sequelize-typescript.ts
++++ b/packages/core/src/sequelize-typescript.ts
+@@ -331,6 +331,7 @@ If you really need to access the connection manager, access it through \`sequeli
+   readonly models = new ModelSetView<Dialect>(this, this.#models);
+   #isClosed: boolean = false;
+   readonly pool: ReplicationPool<Connection<Dialect>, ConnectionOptions<Dialect>>;
++  #healthCheckTimer: ReturnType<typeof setInterval> | undefined;
+ 
+   get modelManager(): never {
+     throw new Error('Sequelize#modelManager was removed. Use Sequelize#models instead.');
+@@ -699,7 +700,21 @@ Connection options can be used at the root of the option bag, in the "replicatio
+         connection: Connection<Dialect>,
+         acquireOptions: AcquireConnectionOptions,
+       ) => {
+-        return this.hooks.runAsync('afterPoolAcquire', connection, acquireOptions);
++        await this.hooks.runAsync('afterPoolAcquire', connection, acquireOptions);
++
++        const healthCheckOptions = options.pool?.healthCheck;
++        if (healthCheckOptions?.enabled) {
++          const mode = healthCheckOptions.mode ?? 'acquire';
++          if (mode === 'acquire' || mode === 'both') {
++            const isHealthy = await this.dialect.connectionManager.healthCheck(connection);
++            if (!isHealthy) {
++              await this.pool.destroy(connection);
++              throw new Error(
++                'Connection health check failed: the connection has been destroyed and a new one will be acquired.',
++              );
++            }
++          }
++        }
+       },
+       timeoutErrorClass: ConnectionAcquireTimeoutError,
+       readConfig: this.options.replication.read,
+@@ -710,10 +725,56 @@ Connection options can be used at the root of the option bag, in the "replicatio
+       this.addModels(options.models);
+     }
+ 
++    this.#setupHealthCheckTimer(options);
++
+     // TODO: remove this cast once sequelize-typescript and sequelize have been fully merged
+     Sequelize.hooks.runSync('afterInit', this as unknown as Sequelize);
+   }
+ 
++  #setupHealthCheckTimer(options: Options<Dialect>) {
++    const healthCheckOptions = options.pool?.healthCheck;
++    if (!healthCheckOptions?.enabled) {
++      return;
++    }
++
++    const mode = healthCheckOptions.mode ?? 'acquire';
++    if (mode !== 'idle' && mode !== 'both') {
++      return;
++    }
++
++    const interval = healthCheckOptions.idleCheckIntervalMs ?? 10_000;
++
++    this.#healthCheckTimer = setInterval(async () => {
++      if (this.#isClosed) {
++        return;
++      }
++
++      try {
++        const connection = await this.pool.acquire();
++        try {
++          const isHealthy = await this.dialect.connectionManager.healthCheck(connection);
++          if (!isHealthy) {
++            await this.pool.destroy(connection);
++          } else {
++            this.pool.release(connection);
++          }
++        } catch {
++          await this.pool.destroy(connection);
++        }
++      } catch {
++        // Failed to acquire a connection, the pool may be saturated or empty.
++        // This is normal and will be handled by the normal pool mechanisms.
++      }
++    }, interval);
++
++    // @ts-expect-error -- setInterval returns NodeJS.Timeout with .unref() at runtime (Node.js),
++    // but @types/node may not be available, causing TS to infer the return as `number`.
++    if (this.#healthCheckTimer?.unref) {
++      // @ts-expect-error -- see above
++      this.#healthCheckTimer.unref();
++    }
++  }
++
+   #databaseVersionPromise: Promise<void> | null = null;
+   async #initializeDatabaseVersion(connection: Connection<Dialect>) {
+     if (this.#databaseVersion) {
+@@ -757,6 +818,11 @@ Connection options can be used at the root of the option bag, in the "replicatio
+   async close() {
+     this.#isClosed = true;
+ 
++    if (this.#healthCheckTimer) {
++      clearInterval(this.#healthCheckTimer);
++      this.#healthCheckTimer = undefined;
++    }
++
+     await this.pool.destroyAllNow();
+   }
+ 
+diff --git a/packages/core/src/sequelize.types.ts b/packages/core/src/sequelize.types.ts
+index d136b0120..98471824f 100644
+--- a/packages/core/src/sequelize.types.ts
++++ b/packages/core/src/sequelize.types.ts
+@@ -12,6 +12,50 @@ import type {
+ } from './sequelize.internals.js';
+ import type { NormalizedReplicationOptions } from './sequelize.js';
+ 
++/**
++ * Health check options for connection pool.
++ *
++ * Used in {@link PoolOptions.healthCheck}
++ */
++export interface PoolHealthCheckOptions {
++  /**
++   * Whether to enable connection health checks.
++   *
++   * When enabled, Sequelize will actively test connections before they are used.
++   * This helps detect broken connections caused by database server restarts or network interruptions.
++   *
++   * @default false
++   */
++  enabled?: boolean;
++
++  /**
++   * The health check mode. Determines when connections are checked:
++   *
++   * - `'acquire'`: Check connections when they are acquired from the pool (before use).
++   * - `'idle'`: Check idle connections periodically (uses driver-level validation).
++   * - `'both'`: Check connections both when acquired and when idle.
++   *
++   * @default 'acquire'
++   */
++  mode?: 'acquire' | 'idle' | 'both';
++
++  /**
++   * A custom SQL query to use for connection health checks.
++   *
++   * If not specified, a built-in dialect-appropriate query will be used
++   * (typically `SELECT 1` or equivalent).
++   */
++  query?: string;
++
++  /**
++   * The interval in milliseconds at which idle connections are checked.
++   * Only applies when {@link mode} includes `'idle'`.
++   *
++   * @default 10_000 (10 seconds)
++   */
++  idleCheckIntervalMs?: number;
++}
++
+ /**
+  * Connection Pool options.
+  *
+@@ -25,6 +69,15 @@ export interface PoolOptions<Dialect extends AbstractDialect>
+    * If provided, this overrides the default connection validation built in to sequelize.
+    */
+   validate?: ((connection?: Connection<Dialect>) => boolean) | undefined;
++
++  /**
++   * Health check configuration for connections in the pool.
++   *
++   * When enabled, Sequelize will actively test connections to ensure they are still valid
++   * before they are used, helping to recover from database server restarts or network
++   * interruptions without manual intervention.
++   */
++  healthCheck?: PoolHealthCheckOptions;
+ }
+ 
+ /**

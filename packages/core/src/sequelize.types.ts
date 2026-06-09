@@ -13,6 +13,50 @@ import type {
 import type { NormalizedReplicationOptions } from './sequelize.js';
 
 /**
+ * Health check options for connection pool.
+ *
+ * Used in {@link PoolOptions.healthCheck}
+ */
+export interface PoolHealthCheckOptions {
+  /**
+   * Whether to enable connection health checks.
+   *
+   * When enabled, Sequelize will actively test connections before they are used.
+   * This helps detect broken connections caused by database server restarts or network interruptions.
+   *
+   * @default false
+   */
+  enabled?: boolean;
+
+  /**
+   * The health check mode. Determines when connections are checked:
+   *
+   * - `'acquire'`: Check connections when they are acquired from the pool (before use).
+   * - `'idle'`: Check idle connections periodically (uses driver-level validation).
+   * - `'both'`: Check connections both when acquired and when idle.
+   *
+   * @default 'acquire'
+   */
+  mode?: 'acquire' | 'idle' | 'both';
+
+  /**
+   * A custom SQL query to use for connection health checks.
+   *
+   * If not specified, a built-in dialect-appropriate query will be used
+   * (typically `SELECT 1` or equivalent).
+   */
+  query?: string;
+
+  /**
+   * The interval in milliseconds at which idle connections are checked.
+   * Only applies when {@link mode} includes `'idle'`.
+   *
+   * @default 10_000 (10 seconds)
+   */
+  idleCheckIntervalMs?: number;
+}
+
+/**
  * Connection Pool options.
  *
  * Used in {@link SequelizeCoreOptions.pool}
@@ -25,6 +69,15 @@ export interface PoolOptions<Dialect extends AbstractDialect>
    * If provided, this overrides the default connection validation built in to sequelize.
    */
   validate?: ((connection?: Connection<Dialect>) => boolean) | undefined;
+
+  /**
+   * Health check configuration for connections in the pool.
+   *
+   * When enabled, Sequelize will actively test connections to ensure they are still valid
+   * before they are used, helping to recover from database server restarts or network
+   * interruptions without manual intervention.
+   */
+  healthCheck?: PoolHealthCheckOptions;
 }
 
 /**
