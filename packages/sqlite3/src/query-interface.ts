@@ -536,4 +536,45 @@ export class SqliteQueryInterface<
     );
     await this.#internalQueryInterface.executeQueriesSequentially(sql, { ...options, raw: true });
   }
+
+  async upsert(
+    tableName: TableOrModel,
+    insertValues: object,
+    updateValues: object,
+    where: object,
+    options: any,
+  ): Promise<any> {
+    const model = options.model;
+    
+    // SQLite upsert doesn't work well with unique constraints containing NULLs (deletedAt).
+    // When soft delete is enabled, we use a manual findOne and create/update to properly support it.
+    if (model && model.options.paranoid) {
+      const instance = await model.findOne({
+        where: where,
+        transaction: options.transaction,
+        logging: options.logging,
+        benchmark: options.benchmark,
+        paranoid: true, // Only find active records
+      });
+
+      if (instance) {
+        await instance.update(updateValues, {
+          transaction: options.transaction,
+          logging: options.logging,
+          benchmark: options.benchmark,
+        });
+        return [instance, false];
+      } else {
+        const newInstance = await model.create(insertValues, {
+          transaction: options.transaction,
+          logging: options.logging,
+          benchmark: options.benchmark,
+          ignoreDuplicates: true,
+        });
+        return [newInstance, true];
+      }
+    }
+
+    return super.upsert(tableName, insertValues, updateValues, where, options);
+  }
 }

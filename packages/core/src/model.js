@@ -1419,6 +1419,16 @@ ${associationOwner._getAssociationDebugList()}`);
 
     options = this._paranoidClause(this, options);
 
+    // In SQLite, unique constraints with soft deletes allow duplicate active records (NULL != NULL).
+    // We order by deletedAt ASC to ensure active records (NULL) are found first.
+    if (this.sequelize.dialect.name === 'sqlite3' && this.options.paranoid && !options.paranoid) {
+      options.order = options.order || [];
+      const deletedAtCol = this.modelDefinition.timestampAttributeNames.deletedAt;
+      if (deletedAtCol) {
+        options.order.push([deletedAtCol, 'ASC']);
+      }
+    }
+
     if (options.hooks) {
       await this.hooks.runAsync('beforeFindAfterOptions', options);
     }
@@ -1578,6 +1588,16 @@ ${associationOwner._getAssociationDebugList()}`);
     // https://github.com/sequelize/sequelize/issues/14618
     if (options.limit === undefined) {
       options.limit = 1;
+    }
+
+    // In SQLite, unique constraints with soft deletes allow duplicate active records (NULL != NULL).
+    // We order by deletedAt ASC to ensure active records (NULL) are found first.
+    if (this.sequelize.dialect.name === 'sqlite3' && this.options.paranoid && !options.paranoid) {
+      options.order = options.order || [];
+      const deletedAtCol = this.modelDefinition.timestampAttributeNames.deletedAt;
+      if (deletedAtCol) {
+        options.order.push([deletedAtCol, 'ASC']);
+      }
     }
 
     // Bypass a possible overloaded findAll.
