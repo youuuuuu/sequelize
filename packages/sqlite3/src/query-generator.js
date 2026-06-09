@@ -10,6 +10,7 @@ import { removeNullishValuesFromHash } from '@sequelize/core/_non-semver-use-at-
 import { EMPTY_SET } from '@sequelize/core/_non-semver-use-at-your-own-risk_/utils/object.js';
 import { defaultValueSchemable } from '@sequelize/core/_non-semver-use-at-your-own-risk_/utils/query-builder-utils.js';
 import { createBindParamGenerator } from '@sequelize/core/_non-semver-use-at-your-own-risk_/utils/sql.js';
+import { generateIndexName } from '@sequelize/core/_non-semver-use-at-your-own-risk_/utils/string.js';
 import { pojo } from '@sequelize/utils';
 import defaults from 'lodash/defaults';
 import each from 'lodash/each';
@@ -18,7 +19,6 @@ import { SqliteQueryGeneratorTypeScript } from './query-generator-typescript.int
 
 export class SqliteQueryGenerator extends SqliteQueryGeneratorTypeScript {
   createTableQuery(tableName, attributes, options) {
-    // TODO: add support for 'uniqueKeys' by improving the createTableQuery implementation so it also generates a CREATE UNIQUE INDEX query
     if (options) {
       rejectInvalidOptions(
         'createTableQuery',
@@ -44,7 +44,6 @@ export class SqliteQueryGenerator extends SqliteQueryGeneratorTypeScript {
         let dataTypeString = dataType;
         if (dataType.includes('PRIMARY KEY')) {
           if (dataType.includes('INT')) {
-            // Only INTEGER is allowed for primary key, see https://github.com/sequelize/sequelize/issues/969 (no lenght, unsigned etc)
             dataTypeString = containsAutoIncrement
               ? 'INTEGER PRIMARY KEY AUTOINCREMENT'
               : 'INTEGER PRIMARY KEY';
@@ -72,27 +71,6 @@ export class SqliteQueryGenerator extends SqliteQueryGeneratorTypeScript {
     let attrStr = attrArray.join(', ');
     const pkString = primaryKeys.map(pk => this.quoteIdentifier(pk)).join(', ');
 
-    // sqlite has a bug where using CONSTRAINT constraint_name UNIQUE during CREATE TABLE
-    //  does not respect the provided constraint name
-    //  and uses sqlite_autoindex_ as the name of the constraint instead.
-    //  CREATE UNIQUE INDEX does not have this issue, so we're using that instead
-    //
-    // if (options.uniqueKeys) {
-    //   each(options.uniqueKeys, (columns, indexName) => {
-    //     if (columns.customIndex) {
-    //       if (typeof indexName !== 'string') {
-    //         indexName = generateIndexName(tableName, columns);
-    //       }
-    //
-    //       attrStr += `, CONSTRAINT ${
-    //         this.quoteIdentifier(indexName)
-    //       } UNIQUE (${
-    //         columns.fields.map(field => this.quoteIdentifier(field)).join(', ')
-    //       })`;
-    //     }
-    //   });
-    // }
-
     if (pkString.length > 0) {
       attrStr += `, PRIMARY KEY (${pkString})`;
     }
@@ -100,6 +78,41 @@ export class SqliteQueryGenerator extends SqliteQueryGeneratorTypeScript {
     const sql = `CREATE TABLE IF NOT EXISTS ${table} (${attrStr});`;
 
     return this.replaceBooleanDefaults(sql);
+  }
+
+  generateUniqueIndexQueries(tableName, options) {
+    if (!options?.uniqueKeys) {
+      return [];
+    }
+
+    const table = this.quoteTable(tableName);
+    const queries = [];
+    const paranoidDeletedAtField = options.paranoidDeletedAtField;
+
+    for (const key of Object.keys(options.uniqueKeys)) {
+      const columns = options.uniqueKeys[key];
+      if (!columns.customIndex) {
+        continue;
+      }
+
+      let indexName = typeof key === 'string' ? key : null;
+      if (!indexName) {
+        indexName = generateIndexName(tableName, columns);
+      }
+
+      const fields = columns.fields.map(field => this.quoteIdentifier(field));
+
+      let whereClause = '';
+      if (paranoidDeletedAtField) {
+        whereClause = ` WHERE ${this.quoteIdentifier(paranoidDeletedAtField)} IS NULL`;
+      }
+
+      queries.push(
+        `CREATE UNIQUE INDEX IF NOT EXISTS ${this.quoteIdentifier(indexName)} ON ${table} (${fields.join(', ')})${whereClause};`,
+      );
+    }
+
+    return queries;
   }
 
   addColumnQuery(table, key, dataType, options) {

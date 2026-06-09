@@ -2477,11 +2477,16 @@ ${associationOwner._getAssociationDebugList()}`);
             );
           } else {
             const upsertKeys = [];
+            const isParanoid =
+              model.options?.timestamps && model.options?.paranoid;
 
             for (const i of model.getIndexes()) {
-              if (i.unique && !i.where) {
-                // Don't infer partial indexes
-                upsertKeys.push(...i.fields);
+              if (i.unique) {
+                if (!i.where) {
+                  upsertKeys.push(...i.fields);
+                } else if (isParanoid) {
+                  upsertKeys.push(...i.fields);
+                }
               }
             }
 
@@ -2489,6 +2494,16 @@ ${associationOwner._getAssociationDebugList()}`);
               upsertKeys.length > 0
                 ? upsertKeys
                 : Object.values(model.primaryKeys).map(x => x.field);
+
+            if (isParanoid && !options.conflictWhere) {
+              const deletedAtCol =
+                model.modelDefinition.timestampAttributeNames.deletedAt;
+              const deletedAtAttr =
+                model.modelDefinition.attributes.get(deletedAtCol);
+              options.conflictWhere = {
+                [deletedAtAttr?.field || deletedAtCol]: null,
+              };
+            }
           }
         }
 

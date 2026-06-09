@@ -11,6 +11,8 @@ import type {
   RemoveConstraintOptions,
   ShowConstraintsOptions,
   TableOrModel,
+  ModelStatic,
+  UpsertOptions,
 } from '@sequelize/core';
 import {
   AbstractQueryInterface,
@@ -24,7 +26,9 @@ import {
   noSchemaParameter,
 } from '@sequelize/core/_non-semver-use-at-your-own-risk_/utils/deprecations.js';
 import { withSqliteForeignKeysOff } from '@sequelize/core/_non-semver-use-at-your-own-risk_/utils/sql.js';
+import cloneDeep from 'lodash/cloneDeep';
 import isEmpty from 'lodash/isEmpty';
+import mapValues from 'lodash/mapValues';
 import type { SqliteDialect } from './dialect.js';
 import { SqliteQueryInterfaceInternal } from './query-interface.internal.js';
 import type { SqliteColumnsDescription } from './query-interface.types.js';
@@ -39,6 +43,122 @@ export class SqliteQueryInterface<
 
     super(dialect, internalQueryInterface);
     this.#internalQueryInterface = internalQueryInterface;
+  }
+
+  async createTable(
+    tableName: TableOrModel,
+    attributes: any,
+    options: any,
+    model?: ModelStatic,
+  ): Promise<void> {
+    options = { ...options };
+
+    if (model && model.options?.paranoid) {
+      const deletedAtAttr = model.modelDefinition.timestampAttributeNames.deletedAt;
+      const deletedAtCol = model.modelDefinition.attributes.get(deletedAtAttr);
+      const deletedAtField = deletedAtCol?.field || deletedAtAttr;
+
+      options.uniqueKeys = options.uniqueKeys || model.uniqueKeys;
+      options.paranoidDeletedAtField = deletedAtField;
+    }
+
+    attributes = mapValues(attributes, (attribute: any) =>
+      this.sequelize.normalizeAttribute(attribute),
+    );
+
+    await this.ensureEnums(tableName, attributes, options, model);
+    await this.ensureSequences(tableName, attributes, options);
+
+    const modelTable = model?.table;
+
+    if (!tableName.schema && (options.schema || modelTable?.schema)) {
+      tableName = this.queryGenerator.extractTableDetails(tableName);
+      tableName.schema = modelTable?.schema || options.schema;
+    }
+
+    attributes = this.queryGenerator.attributesToSQL(attributes, {
+      table: tableName,
+      context: 'createTable',
+      withoutForeignKeyConstraints: options.withoutForeignKeyConstraints,
+      schema: options.schema,
+    });
+
+    const sql = this.queryGenerator.createTableQuery(tableName, attributes, options);
+
+    const uniqueIndexQueries =
+      this.queryGenerator.generateUniqueIndexQueries(tableName, options);
+
+    await this.sequelize.queryRaw(sql, options);
+
+    for (const indexQuery of uniqueIndexQueries) {
+      await this.sequelize.queryRaw(indexQuery, options);
+    }
+  }
+
+  async addIndex(
+    tableName: TableOrModel,
+    attributes: any,
+    options: any,
+    rawTablename?: any,
+  ): Promise<void> {
+    if (!Array.isArray(attributes)) {
+      rawTablename = options;
+      options = attributes;
+      attributes = options.fields;
+    }
+
+    if (!rawTablename) {
+      rawTablename = tableName;
+    }
+
+    options = cloneDeep(options) ?? {};
+    options.fields = attributes;
+
+    if (options.unique && !options.where) {
+      const model = this.#findModelByTableName(tableName);
+      if (model?.options?.paranoid) {
+        const deletedAtCol = model.modelDefinition.timestampAttributeNames.deletedAt;
+        const deletedAtAttr = model.modelDefinition.attributes.get(deletedAtCol);
+        options.where = { [deletedAtAttr?.field || deletedAtCol]: null };
+      }
+    }
+
+    const sql = this.queryGenerator.addIndexQuery(tableName, options, rawTablename);
+
+    return await this.sequelize.queryRaw(sql, { ...options, supportsSearchPath: false });
+  }
+
+  async upsert(
+    tableName: TableOrModel,
+    insertValues: any,
+    updateValues: any,
+    where: any,
+    options: any,
+  ): Promise<any> {
+    const model = options?.model;
+    if (model?.options?.paranoid && this.dialect.supports.inserts.onConflictWhere) {
+      const deletedAtCol = model.modelDefinition.timestampAttributeNames.deletedAt;
+      const deletedAtAttr = model.modelDefinition.attributes.get(deletedAtCol);
+      const deletedAtField = deletedAtAttr?.field || deletedAtCol;
+
+      if (!options.conflictWhere) {
+        options.conflictWhere = {};
+      }
+
+      if (!Object.hasOwn(options.conflictWhere, deletedAtField)) {
+        options.conflictWhere[deletedAtField] = null;
+      }
+    }
+
+    return super.upsert(tableName, insertValues, updateValues, where, options);
+  }
+
+  #findModelByTableName(tableName: TableOrModel): ModelStatic | undefined {
+    const table = this.queryGenerator.extractTableDetails(tableName);
+
+    return Object.values(this.sequelize.models).find(
+      (m: ModelStatic) => m.table.tableName === table.tableName && m.table.schema === table.schema,
+    ) as ModelStatic | undefined;
   }
 
   async dropAllTables(options?: QiDropAllTablesOptions): Promise<void> {
