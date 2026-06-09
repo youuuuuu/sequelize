@@ -102,6 +102,25 @@ export class SqliteQueryGenerator extends SqliteQueryGeneratorTypeScript {
     return this.replaceBooleanDefaults(sql);
   }
 
+  addIndexQuery(tableName, options, rawTablename) {
+    const modelDefinition = options.model?.modelDefinition;
+    
+    if (modelDefinition && options.unique && modelDefinition.isParanoid()) {
+      const deletedAtCol = modelDefinition.timestampAttributeNames.deletedAt;
+      if (deletedAtCol) {
+        const deletedAtAttribute = modelDefinition.attributes.get(deletedAtCol);
+        const deletedAtField = deletedAtAttribute.field || deletedAtCol;
+        
+        if (!options.fields.includes(deletedAtField)) {
+          options = { ...options };
+          options.fields = [...options.fields, deletedAtField];
+        }
+      }
+    }
+
+    return super.addIndexQuery(tableName, options, rawTablename);
+  }
+
   addColumnQuery(table, key, dataType, options) {
     if (options) {
       rejectInvalidOptions(

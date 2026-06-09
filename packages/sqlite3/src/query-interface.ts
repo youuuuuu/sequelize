@@ -23,8 +23,15 @@ import {
   noSchemaDelimiterParameter,
   noSchemaParameter,
 } from '@sequelize/core/_non-semver-use-at-your-own-risk_/utils/deprecations.js';
-import { withSqliteForeignKeysOff } from '@sequelize/core/_non-semver-use-at-your-own-risk_/utils/sql.js';
+import {
+  assertNoReservedBind,
+  combineBinds,
+  withSqliteForeignKeysOff,
+} from '@sequelize/core/_non-semver-use-at-your-own-risk_/utils/sql.js';
+import { getObjectFromMap } from '@sequelize/core/_non-semver-use-at-your-own-risk_/utils/object.js';
 import isEmpty from 'lodash/isEmpty';
+import uniq from 'lodash/uniq';
+import intersection from 'lodash/intersection';
 import type { SqliteDialect } from './dialect.js';
 import { SqliteQueryInterfaceInternal } from './query-interface.internal.js';
 import type { SqliteColumnsDescription } from './query-interface.types.js';
@@ -39,6 +46,106 @@ export class SqliteQueryInterface<
 
     super(dialect, internalQueryInterface);
     this.#internalQueryInterface = internalQueryInterface;
+  }
+
+  async upsert(
+    tableName: TableOrModel,
+    insertValues: Record<string, unknown>,
+    updateValues: Record<string, unknown>,
+    where: Record<string, unknown>,
+    options: QueryRawOptions & { model: any },
+  ): Promise<[boolean, number | null]> {
+    if (options?.bind) {
+      assertNoReservedBind(options.bind);
+    }
+
+    options = { ...options };
+
+    const model = options.model;
+    const modelDefinition = model.modelDefinition;
+
+    options.type = QueryTypes.UPSERT;
+    options.updateOnDuplicate = Object.keys(updateValues);
+    options.upsertKeys = options.conflictFields || [];
+
+    if (options.upsertKeys.length === 0) {
+      const primaryKeys = Array.from(
+        modelDefinition.primaryKeysAttributeNames,
+        (pkAttrName: string) => modelDefinition.attributes.get(pkAttrName).columnName,
+      );
+
+      const uniqueColumnNames = Object.values(model.getIndexes())
+        .filter((c: any) => c.unique && c.fields.length > 0)
+        .map((c: any) => c.fields);
+
+      // For paranoid models, add deletedAt to upsertKeys if it's not already there
+      if (modelDefinition.isParanoid()) {
+        const deletedAtCol = modelDefinition.timestampAttributeNames.deletedAt;
+        if (deletedAtCol) {
+          const deletedAtAttribute = modelDefinition.attributes.get(deletedAtCol);
+          const deletedAtField = deletedAtAttribute.columnName || deletedAtCol;
+          
+          // Find unique indexes that match the insert values
+          for (const fields of uniqueColumnNames) {
+            const insertFieldNames = Object.keys(insertValues);
+            if (intersection(insertFieldNames, fields).length === fields.length) {
+              // This unique index matches, add deletedAt to the upsert keys
+              if (!fields.includes(deletedAtField)) {
+                options.upsertKeys = [...fields, deletedAtField];
+              } else {
+                options.upsertKeys = fields;
+              }
+              break;
+            }
+          }
+        }
+      }
+
+      // For fields in updateValues, try to find a constraint or unique index
+      // that includes given field. Only first matching upsert key is used.
+      if (options.upsertKeys.length === 0) {
+        for (const field of options.updateOnDuplicate) {
+          const indexKey = uniqueColumnNames.find((fields: string[]) => fields.includes(field));
+          if (indexKey) {
+            options.upsertKeys = indexKey;
+            break;
+          }
+        }
+      }
+
+      // Always use PK, if no constraint available OR update data contains PK
+      if (
+        options.upsertKeys.length === 0 ||
+        intersection(options.updateOnDuplicate, primaryKeys).length > 0
+      ) {
+        options.upsertKeys = primaryKeys;
+      }
+
+      options.upsertKeys = uniq(options.upsertKeys);
+    }
+
+    // For paranoid models, add conflictWhere to filter out soft-deleted records
+    if (modelDefinition.isParanoid() && !options.conflictWhere) {
+      const deletedAtCol = modelDefinition.timestampAttributeNames.deletedAt;
+      if (deletedAtCol) {
+        const deletedAtAttribute = modelDefinition.attributes.get(deletedAtCol);
+        const deletedAtField = deletedAtAttribute.columnName || deletedAtCol;
+        options.conflictWhere = { [deletedAtField]: null };
+      }
+    }
+
+    const { bind, query } = this.queryGenerator.insertQuery(
+      tableName,
+      insertValues,
+      getObjectFromMap(modelDefinition.attributes),
+      options,
+    );
+
+    // unlike bind, replacements are handled by QueryGenerator, not QueryRaw
+    delete (options as any).replacement;
+    options.bind = combineBinds(options.bind, bind);
+
+    return await this.sequelize.queryRaw(query, options);
   }
 
   async dropAllTables(options?: QiDropAllTablesOptions): Promise<void> {
